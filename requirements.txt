@@ -1,0 +1,23 @@
+# Core Framework
+streamlit
+
+# LLM & RAG Stack
+langchain
+langchain-google-genai
+google-generativeai
+
+# Vector Database
+chromadb
+
+# PDF Processing
+pypdf
+
+# Visualization
+plotly
+
+# Environment Management
+python-dotenv
+
+# Utilities
+numpy
+pandas
