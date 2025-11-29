@@ -22,7 +22,7 @@ class RAGEngine:
     
     def __init__(
         self, 
-        pdf_path: str = "data/grundfos-cr-pump-troubleshooting.pdf",
+        pdf_path: str = "../data/grundfos-cr-pump-troubleshooting.pdf",
         persist_directory: str = "./chroma_db",
         collection_name: str = "pump_manual"
     ):

@@ -1,6 +1,11 @@
 # Core Framework
 streamlit
 
+# FastAPI Backend
+fastapi
+uvicorn[standard]
+websockets
+
 # LLM & RAG Stack
 langchain
 langchain-google-genai

@@ -1,0 +1,903 @@
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { 
+  Zap, Gauge, Activity, Thermometer, 
+  Droplets, MessageSquare, AlertTriangle, 
+  CheckCircle, RefreshCw, Send, Bot, User
+} from 'lucide-react'
+import { 
+  LineChart, Line, XAxis, YAxis, CartesianGrid, 
+  Tooltip, ResponsiveContainer, Legend, ReferenceLine,
+  ReferenceArea, AreaChart, Area, ComposedChart
+} from 'recharts'
+
+// API Base URL
+const API_BASE = ''  // Empty for Vite proxy
+
+// =====================================================
+// Sparkline Component (Mini Chart)
+// =====================================================
+function Sparkline({ data, dataKey, color, height = 40 }) {
+  return (
+    <div className="w-full" style={{ height }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data} margin={{ top: 2, right: 2, left: 2, bottom: 2 }}>
+          <defs>
+            <linearGradient id={`gradient-${dataKey}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor={color} stopOpacity={0.3}/>
+              <stop offset="95%" stopColor={color} stopOpacity={0}/>
+            </linearGradient>
+          </defs>
+          <Area 
+            type="monotone" 
+            dataKey={dataKey} 
+            stroke={color} 
+            strokeWidth={1.5}
+            fill={`url(#gradient-${dataKey})`}
+            dot={false}
+            isAnimationActive={false}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+// =====================================================
+// Metric Card Component with Sparkline
+// =====================================================
+function MetricCard({ title, value, unit, icon: Icon, status = 'normal', subValues = null, sparklineData = [], sparklineKey = 'value', threshold = null }) {
+  const statusColors = {
+    normal: 'from-blue-500/20 to-cyan-500/20 border-blue-500/30',
+    warning: 'from-amber-500/20 to-orange-500/20 border-amber-500/30',
+    danger: 'from-red-500/20 to-rose-500/20 border-red-500/30 pulse-danger',
+    success: 'from-green-500/20 to-emerald-500/20 border-green-500/30',
+  }
+
+  const iconColors = {
+    normal: 'text-blue-400',
+    warning: 'text-amber-400',
+    danger: 'text-red-400',
+    success: 'text-green-400',
+  }
+
+  const sparklineColors = {
+    normal: '#3b82f6',
+    warning: '#f59e0b',
+    danger: '#ef4444',
+    success: '#22c55e',
+  }
+
+  return (
+    <div className={`glass rounded-xl p-4 bg-gradient-to-br ${statusColors[status]} transition-all duration-300 ${status === 'danger' ? 'animate-pulse' : ''}`}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-slate-400 text-sm font-medium">{title}</span>
+        <Icon className={`w-5 h-5 ${iconColors[status]}`} />
+      </div>
+      <div className="flex items-baseline gap-1">
+        <span className="text-3xl font-bold text-white mono">
+          {typeof value === 'number' ? value.toFixed(2) : value}
+        </span>
+        <span className="text-slate-400 text-sm">{unit}</span>
+      </div>
+      {subValues && (
+        <div className="mt-2 flex gap-3 text-xs text-slate-400">
+          {subValues.map((sv, i) => (
+            <span key={i} className="flex items-center gap-1">
+              <span className={`w-2 h-2 rounded-full ${sv.color}`}></span>
+              {sv.label}: <span className="mono text-slate-300">{sv.value}</span>
+            </span>
+          ))}
+        </div>
+      )}
+      
+      {/* Sparkline */}
+      {sparklineData.length > 0 && (
+        <div className="mt-3 -mx-1">
+          <Sparkline 
+            data={sparklineData} 
+            dataKey={sparklineKey} 
+            color={sparklineColors[status]} 
+          />
+        </div>
+      )}
+      
+      {/* Threshold indicator */}
+      {threshold && (
+        <div className={`mt-2 text-xs ${status === 'normal' ? 'text-green-400' : 'text-red-400'}`}>
+          {status === 'normal' ? '✓' : '⚠'} {threshold}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// =====================================================
+// Fault Button Component
+// =====================================================
+function FaultButton({ id, name, icon, active, onClick, disabled }) {
+  const isNormal = id === 'NORMAL'
+  
+  return (
+    <button
+      onClick={() => onClick(id)}
+      disabled={disabled}
+      className={`
+        flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm
+        transition-all duration-200 
+        ${active 
+          ? (isNormal 
+              ? 'bg-green-500/20 border border-green-500/50 text-green-400 shadow-glow-success' 
+              : 'bg-red-500/20 border border-red-500/50 text-red-400 shadow-glow-danger')
+          : 'glass-light hover:bg-slate-700/50 text-slate-300 hover:text-white'
+        }
+        disabled:opacity-50 disabled:cursor-not-allowed
+      `}
+    >
+      <span>{icon}</span>
+      <span>{name}</span>
+    </button>
+  )
+}
+
+// =====================================================
+// Diagnosis Panel Component
+// =====================================================
+function DiagnosisPanel({ diagnosis, isLoading, onRefresh }) {
+  return (
+    <div className="glass rounded-xl p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <Bot className="w-5 h-5 text-cyan-400" />
+          <h3 className="font-semibold text-white">AI Diagnosis</h3>
+        </div>
+        <button
+          onClick={onRefresh}
+          disabled={isLoading}
+          className="p-2 rounded-lg hover:bg-slate-700/50 transition-colors disabled:opacity-50"
+        >
+          <RefreshCw className={`w-4 h-4 text-slate-400 ${isLoading ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
+      
+      <div className="bg-slate-800/50 rounded-lg p-4 max-h-64 overflow-y-auto">
+        {isLoading ? (
+          <div className="flex items-center gap-3 text-slate-400">
+            <RefreshCw className="w-5 h-5 animate-spin" />
+            <span>Analyzing sensor data...</span>
+          </div>
+        ) : diagnosis ? (
+          <div className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap slide-in">
+            {diagnosis}
+          </div>
+        ) : (
+          <div className="text-slate-500 text-sm italic">
+            Inject a fault to see AI diagnosis, or click refresh to analyze current state.
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// =====================================================
+// Chat Interface Component
+// =====================================================
+function ChatInterface({ onSendMessage, messages, isLoading }) {
+  const [input, setInput] = useState('')
+  const messagesEndRef = useRef(null)
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }
+
+  useEffect(() => {
+    scrollToBottom()
+  }, [messages])
+
+  const handleSubmit = (e) => {
+    e.preventDefault()
+    if (input.trim() && !isLoading) {
+      onSendMessage(input.trim())
+      setInput('')
+    }
+  }
+
+  return (
+    <div className="glass rounded-xl flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center gap-2 p-4 border-b border-slate-700/50">
+        <MessageSquare className="w-5 h-5 text-cyan-400" />
+        <h3 className="font-semibold text-white">Maintenance Assistant</h3>
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-[300px] max-h-[400px]">
+        {messages.length === 0 ? (
+          <div className="text-center text-slate-500 text-sm py-8">
+            <Bot className="w-12 h-12 mx-auto mb-3 opacity-50" />
+            <p>Ask me anything about pump maintenance,</p>
+            <p>troubleshooting, or current sensor readings.</p>
+          </div>
+        ) : (
+          messages.map((msg, i) => (
+            <div
+              key={i}
+              className={`flex gap-3 slide-in ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+            >
+              {msg.role === 'assistant' && (
+                <div className="w-8 h-8 rounded-full bg-cyan-500/20 flex items-center justify-center flex-shrink-0">
+                  <Bot className="w-4 h-4 text-cyan-400" />
+                </div>
+              )}
+              <div
+                className={`max-w-[80%] rounded-xl px-4 py-2 ${
+                  msg.role === 'user'
+                    ? 'bg-blue-500/20 text-blue-100'
+                    : 'bg-slate-700/50 text-slate-200'
+                }`}
+              >
+                <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+              </div>
+              {msg.role === 'user' && (
+                <div className="w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center flex-shrink-0">
+                  <User className="w-4 h-4 text-blue-400" />
+                </div>
+              )}
+            </div>
+          ))
+        )}
+        {isLoading && (
+          <div className="flex gap-3 slide-in">
+            <div className="w-8 h-8 rounded-full bg-cyan-500/20 flex items-center justify-center">
+              <Bot className="w-4 h-4 text-cyan-400" />
+            </div>
+            <div className="bg-slate-700/50 rounded-xl px-4 py-2">
+              <div className="flex gap-1">
+                <span className="w-2 h-2 bg-cyan-400 rounded-full animate-bounce"></span>
+                <span className="w-2 h-2 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></span>
+                <span className="w-2 h-2 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></span>
+              </div>
+            </div>
+          </div>
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Input */}
+      <form onSubmit={handleSubmit} className="p-4 border-t border-slate-700/50">
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Ask about maintenance..."
+            className="flex-1 bg-slate-800/50 border border-slate-700/50 rounded-lg px-4 py-2 
+                       text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500/50
+                       transition-colors"
+          />
+          <button
+            type="submit"
+            disabled={!input.trim() || isLoading}
+            className="px-4 py-2 bg-cyan-500/20 border border-cyan-500/50 rounded-lg
+                       text-cyan-400 hover:bg-cyan-500/30 transition-colors
+                       disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Send className="w-4 h-4" />
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
+// =====================================================
+// Live Chart Component with Reference Lines
+// =====================================================
+function LiveChart({ data, activeFault }) {
+  const chartData = data.map((reading, index) => ({
+    time: index,
+    phase_a: reading.amperage?.phase_a || 0,
+    phase_b: reading.amperage?.phase_b || 0,
+    phase_c: reading.amperage?.phase_c || 0,
+  }))
+
+  // Calculate statistics
+  const latestData = data[data.length - 1]
+  const avgCurrent = latestData?.amperage?.average || 0
+  const peakCurrent = Math.max(
+    ...data.slice(-30).map(d => Math.max(d.amperage?.phase_a || 0, d.amperage?.phase_b || 0, d.amperage?.phase_c || 0))
+  )
+  const imbalance = latestData?.amperage?.imbalance_pct || 0
+
+  const hasWarning = imbalance > 5 || activeFault !== 'NORMAL'
+
+  return (
+    <div className={`glass rounded-xl p-4 transition-all duration-300 ${hasWarning ? 'ring-2 ring-amber-500/50' : ''}`}>
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Activity className="w-5 h-5 text-cyan-400" />
+          <h3 className="font-semibold text-white">⚡ Three-Phase Current Monitoring (Last 60s)</h3>
+        </div>
+        {hasWarning && (
+          <span className="px-2 py-1 rounded-full bg-amber-500/20 text-amber-400 text-xs font-medium">
+            ⚠️ Imbalance Detected
+          </span>
+        )}
+      </div>
+      
+      <div className="h-64">
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 5 }}>
+            <defs>
+              <linearGradient id="overloadGradient" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#ef4444" stopOpacity={0.3}/>
+                <stop offset="100%" stopColor="#ef4444" stopOpacity={0.05}/>
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(100, 116, 139, 0.2)" />
+            
+            {/* Overload Zone */}
+            <ReferenceArea 
+              y1={11.5} 
+              y2={20} 
+              fill="url(#overloadGradient)" 
+              label={{ value: 'Overload Zone', position: 'insideTopRight', fill: '#ef4444', fontSize: 10 }}
+            />
+            
+            {/* Rated Current Reference */}
+            <ReferenceLine 
+              y={10} 
+              stroke="#64748b" 
+              strokeDasharray="5 5" 
+              label={{ value: 'Rated (10A)', position: 'insideBottomRight', fill: '#64748b', fontSize: 10 }}
+            />
+            
+            <XAxis 
+              dataKey="time" 
+              stroke="#64748b" 
+              tick={{ fill: '#94a3b8', fontSize: 12 }}
+              tickFormatter={(v) => `-${60 - v}s`}
+            />
+            <YAxis 
+              stroke="#64748b" 
+              tick={{ fill: '#94a3b8', fontSize: 12 }}
+              domain={[0, 20]}
+              tickFormatter={(v) => `${v}A`}
+            />
+            <Tooltip
+              contentStyle={{
+                backgroundColor: 'rgba(30, 41, 59, 0.95)',
+                border: '1px solid rgba(100, 116, 139, 0.3)',
+                borderRadius: '8px',
+                color: '#e2e8f0',
+              }}
+              labelFormatter={(v) => `${60 - v} seconds ago`}
+              formatter={(value, name) => [`${value.toFixed(2)} A`, name]}
+            />
+            <Legend 
+              wrapperStyle={{ paddingTop: '10px' }}
+              formatter={(value) => <span className="text-slate-300 text-sm">{value}</span>}
+            />
+            <Line
+              type="monotone"
+              dataKey="phase_a"
+              name="Phase A"
+              stroke="#ef4444"
+              strokeWidth={2}
+              dot={false}
+              activeDot={{ r: 4 }}
+            />
+            <Line
+              type="monotone"
+              dataKey="phase_b"
+              name="Phase B"
+              stroke="#22c55e"
+              strokeWidth={2}
+              dot={false}
+              activeDot={{ r: 4 }}
+            />
+            <Line
+              type="monotone"
+              dataKey="phase_c"
+              name="Phase C"
+              stroke="#3b82f6"
+              strokeWidth={2}
+              dot={false}
+              activeDot={{ r: 4 }}
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Stats Bar */}
+      <div className="mt-4 flex items-center gap-6 text-sm">
+        <span className="text-slate-400">
+          📈 Current Status:
+        </span>
+        <span className="text-slate-300">
+          Average: <span className="mono text-white font-medium">{avgCurrent.toFixed(1)}A</span>
+        </span>
+        <span className="text-slate-300">
+          Peak: <span className="mono text-white font-medium">{peakCurrent.toFixed(1)}A</span>
+        </span>
+        <span className={imbalance > 5 ? 'text-amber-400' : 'text-slate-300'}>
+          Imbalance: <span className={`mono font-medium ${imbalance > 5 ? 'text-amber-400' : 'text-white'}`}>{imbalance.toFixed(1)}%</span>
+          {imbalance > 5 && ' ⚠️'}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// =====================================================
+// Multi-Sensor Chart Component
+// =====================================================
+function MultiSensorChart({ data }) {
+  const chartData = data.map((reading, index) => ({
+    time: index,
+    voltage: reading.voltage || 0,
+    vibration: reading.vibration || 0,
+    pressure: reading.pressure || 0,
+    temperature: reading.temperature || 0,
+  }))
+
+  return (
+    <div className="glass rounded-xl p-4">
+      <div className="flex items-center gap-2 mb-4">
+        <Gauge className="w-5 h-5 text-cyan-400" />
+        <h3 className="font-semibold text-white">📊 Sensor Trends (Last 60s)</h3>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        {/* Voltage Chart */}
+        <div className="bg-slate-800/50 rounded-lg p-3">
+          <div className="text-xs text-slate-400 mb-2">🔌 Voltage (V)</div>
+          <div className="h-32">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData}>
+                <defs>
+                  <linearGradient id="voltageGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#a855f7" stopOpacity={0.4}/>
+                    <stop offset="95%" stopColor="#a855f7" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(100, 116, 139, 0.15)" />
+                <XAxis dataKey="time" hide />
+                <YAxis domain={[350, 450]} tick={{ fill: '#94a3b8', fontSize: 10 }} width={35} />
+                <Tooltip
+                  contentStyle={{ backgroundColor: 'rgba(30, 41, 59, 0.95)', border: '1px solid rgba(100, 116, 139, 0.3)', borderRadius: '6px' }}
+                  formatter={(v) => [`${v.toFixed(1)} V`, 'Voltage']}
+                />
+                <ReferenceLine y={400} stroke="#64748b" strokeDasharray="3 3" />
+                <Area type="monotone" dataKey="voltage" stroke="#a855f7" strokeWidth={2} fill="url(#voltageGrad)" dot={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Vibration Chart */}
+        <div className="bg-slate-800/50 rounded-lg p-3">
+          <div className="text-xs text-slate-400 mb-2">📊 Vibration (mm/s)</div>
+          <div className="h-32">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData}>
+                <defs>
+                  <linearGradient id="vibrationGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.4}/>
+                    <stop offset="95%" stopColor="#f59e0b" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(100, 116, 139, 0.15)" />
+                <XAxis dataKey="time" hide />
+                <YAxis domain={[0, 15]} tick={{ fill: '#94a3b8', fontSize: 10 }} width={35} />
+                <Tooltip
+                  contentStyle={{ backgroundColor: 'rgba(30, 41, 59, 0.95)', border: '1px solid rgba(100, 116, 139, 0.3)', borderRadius: '6px' }}
+                  formatter={(v) => [`${v.toFixed(2)} mm/s`, 'Vibration']}
+                />
+                <ReferenceArea y1={5} y2={15} fill="rgba(239, 68, 68, 0.1)" />
+                <ReferenceLine y={5} stroke="#ef4444" strokeDasharray="3 3" />
+                <Area type="monotone" dataKey="vibration" stroke="#f59e0b" strokeWidth={2} fill="url(#vibrationGrad)" dot={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Pressure Chart */}
+        <div className="bg-slate-800/50 rounded-lg p-3">
+          <div className="text-xs text-slate-400 mb-2">💨 Pressure (bar)</div>
+          <div className="h-32">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData}>
+                <defs>
+                  <linearGradient id="pressureGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#14b8a6" stopOpacity={0.4}/>
+                    <stop offset="95%" stopColor="#14b8a6" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(100, 116, 139, 0.15)" />
+                <XAxis dataKey="time" hide />
+                <YAxis domain={[0, 8]} tick={{ fill: '#94a3b8', fontSize: 10 }} width={35} />
+                <Tooltip
+                  contentStyle={{ backgroundColor: 'rgba(30, 41, 59, 0.95)', border: '1px solid rgba(100, 116, 139, 0.3)', borderRadius: '6px' }}
+                  formatter={(v) => [`${v.toFixed(2)} bar`, 'Pressure']}
+                />
+                <Area type="monotone" dataKey="pressure" stroke="#14b8a6" strokeWidth={2} fill="url(#pressureGrad)" dot={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Temperature Chart */}
+        <div className="bg-slate-800/50 rounded-lg p-3">
+          <div className="text-xs text-slate-400 mb-2">🌡️ Temperature (°C)</div>
+          <div className="h-32">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData}>
+                <defs>
+                  <linearGradient id="tempGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#ef4444" stopOpacity={0.4}/>
+                    <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(100, 116, 139, 0.15)" />
+                <XAxis dataKey="time" hide />
+                <YAxis domain={[30, 100]} tick={{ fill: '#94a3b8', fontSize: 10 }} width={35} />
+                <Tooltip
+                  contentStyle={{ backgroundColor: 'rgba(30, 41, 59, 0.95)', border: '1px solid rgba(100, 116, 139, 0.3)', borderRadius: '6px' }}
+                  formatter={(v) => [`${v.toFixed(1)} °C`, 'Temperature']}
+                />
+                <ReferenceArea y1={80} y2={100} fill="rgba(239, 68, 68, 0.15)" />
+                <ReferenceLine y={80} stroke="#ef4444" strokeDasharray="3 3" />
+                <Area type="monotone" dataKey="temperature" stroke="#ef4444" strokeWidth={2} fill="url(#tempGrad)" dot={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// =====================================================
+// Main App Component
+// =====================================================
+function App() {
+  // State
+  const [connected, setConnected] = useState(false)
+  const [sensorData, setSensorData] = useState(null)
+  const [sensorHistory, setSensorHistory] = useState([])
+  const [activeFault, setActiveFault] = useState('NORMAL')
+  const [diagnosis, setDiagnosis] = useState('')
+  const [diagnosisLoading, setDiagnosisLoading] = useState(false)
+  const [chatMessages, setChatMessages] = useState([])
+  const [chatLoading, setChatLoading] = useState(false)
+  const [faultTypes, setFaultTypes] = useState([])
+  
+  const wsRef = useRef(null)
+
+  // Fetch fault types on mount
+  useEffect(() => {
+    fetch(`${API_BASE}/api/fault-types`)
+      .then(res => res.json())
+      .then(data => setFaultTypes(data.fault_types))
+      .catch(err => console.error('Failed to fetch fault types:', err))
+  }, [])
+
+  // WebSocket connection
+  useEffect(() => {
+    const connectWebSocket = () => {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const wsUrl = `${protocol}//${window.location.host}/ws/sensor-stream`
+      
+      wsRef.current = new WebSocket(wsUrl)
+      
+      wsRef.current.onopen = () => {
+        console.log('WebSocket connected')
+        setConnected(true)
+      }
+      
+      wsRef.current.onmessage = (event) => {
+        const message = JSON.parse(event.data)
+        if (message.type === 'sensor_update') {
+          setSensorData(message.data)
+          setSensorHistory(prev => {
+            const newHistory = [...prev, message.data]
+            return newHistory.slice(-60)  // Keep last 60 readings
+          })
+          
+          // Update active fault from sensor data
+          if (message.data.fault_state) {
+            const faultKey = message.data.fault_state.toUpperCase().replace(' ', '_')
+            setActiveFault(faultKey === 'NORMAL' ? 'NORMAL' : faultKey)
+          }
+        }
+      }
+      
+      wsRef.current.onclose = () => {
+        console.log('WebSocket disconnected')
+        setConnected(false)
+        // Reconnect after 3 seconds
+        setTimeout(connectWebSocket, 3000)
+      }
+      
+      wsRef.current.onerror = (error) => {
+        console.error('WebSocket error:', error)
+      }
+    }
+    
+    connectWebSocket()
+    
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close()
+      }
+    }
+  }, [])
+
+  // Inject fault
+  const handleInjectFault = async (faultId) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/inject-fault`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fault_type: faultId })
+      })
+      
+      if (response.ok) {
+        setActiveFault(faultId)
+        
+        // Auto-trigger diagnosis for non-normal faults
+        if (faultId !== 'NORMAL') {
+          setTimeout(() => handleRefreshDiagnosis(), 2000)  // Wait for sensor data to update
+        } else {
+          setDiagnosis('')
+        }
+      }
+    } catch (error) {
+      console.error('Failed to inject fault:', error)
+    }
+  }
+
+  // Refresh diagnosis
+  const handleRefreshDiagnosis = async () => {
+    if (!sensorData) return
+    
+    setDiagnosisLoading(true)
+    try {
+      const response = await fetch(`${API_BASE}/api/diagnose`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sensor_data: sensorData })
+      })
+      
+      if (response.ok) {
+        const data = await response.json()
+        setDiagnosis(data.diagnosis)
+      } else {
+        const error = await response.json()
+        setDiagnosis(`Error: ${error.detail}`)
+      }
+    } catch (error) {
+      setDiagnosis(`Connection error: ${error.message}`)
+    } finally {
+      setDiagnosisLoading(false)
+    }
+  }
+
+  // Send chat message
+  const handleSendMessage = async (message) => {
+    setChatMessages(prev => [...prev, { role: 'user', content: message }])
+    setChatLoading(true)
+    
+    try {
+      const response = await fetch(`${API_BASE}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          message, 
+          include_sensor_context: true 
+        })
+      })
+      
+      if (response.ok) {
+        const data = await response.json()
+        setChatMessages(prev => [...prev, { role: 'assistant', content: data.response }])
+      } else {
+        const error = await response.json()
+        setChatMessages(prev => [...prev, { 
+          role: 'assistant', 
+          content: `Sorry, I encountered an error: ${error.detail}` 
+        }])
+      }
+    } catch (error) {
+      setChatMessages(prev => [...prev, { 
+        role: 'assistant', 
+        content: `Connection error: ${error.message}. Is the backend running?` 
+      }])
+    } finally {
+      setChatLoading(false)
+    }
+  }
+
+  // Get status based on sensor values
+  const getMetricStatus = (type, value) => {
+    if (!sensorData || activeFault === 'NORMAL') return 'normal'
+    
+    switch (type) {
+      case 'amperage':
+        if (sensorData.amperage?.imbalance_pct > 10) return 'danger'
+        if (sensorData.amperage?.imbalance_pct > 5) return 'warning'
+        return 'normal'
+      case 'voltage':
+        if (Math.abs(value - 400) > 20) return 'danger'
+        if (Math.abs(value - 400) > 10) return 'warning'
+        return 'normal'
+      case 'vibration':
+        if (value > 8) return 'danger'
+        if (value > 5) return 'warning'
+        return 'normal'
+      case 'pressure':
+        if (value < 2 || value > 7) return 'danger'
+        if (value < 3 || value > 6) return 'warning'
+        return 'normal'
+      case 'temperature':
+        if (value > 80) return 'danger'
+        if (value > 65) return 'warning'
+        return 'normal'
+      default:
+        return 'normal'
+    }
+  }
+
+  return (
+    <div className="min-h-screen p-6">
+      {/* Header */}
+      <header className="flex items-center justify-between mb-6">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
+            <img src="/pump.svg" alt="Logo" className="w-10 h-10" />
+            <div>
+              <h1 className="text-2xl font-bold text-white">Digital Twin</h1>
+              <p className="text-sm text-slate-400">Grundfos CR Pump • Predictive Maintenance</p>
+            </div>
+          </div>
+        </div>
+        
+        <div className="flex items-center gap-3">
+          <span className={`status-dot ${connected ? 'online' : 'offline'}`}></span>
+          <span className={`text-sm ${connected ? 'text-green-400' : 'text-red-400'}`}>
+            {connected ? 'Connected' : 'Disconnected'}
+          </span>
+          
+          {activeFault !== 'NORMAL' && (
+            <div className="flex items-center gap-2 ml-4 px-3 py-1 rounded-full bg-red-500/20 border border-red-500/50">
+              <AlertTriangle className="w-4 h-4 text-red-400" />
+              <span className="text-red-400 text-sm font-medium">
+                {activeFault.replace('_', ' ')}
+              </span>
+            </div>
+          )}
+        </div>
+      </header>
+
+      {/* Main Layout: 65% Dashboard | 35% Chat */}
+      <div className="flex gap-6">
+        {/* Left: Dashboard (65%) */}
+        <div className="w-[65%] space-y-6">
+          {/* Sensor Metrics with Sparklines */}
+          <div className="grid grid-cols-5 gap-4">
+            <MetricCard
+              title="Amperage"
+              value={sensorData?.amperage?.average || 0}
+              unit="A"
+              icon={Zap}
+              status={getMetricStatus('amperage', sensorData?.amperage?.average)}
+              subValues={[
+                { label: 'A', value: sensorData?.amperage?.phase_a?.toFixed(1) || '0', color: 'bg-red-400' },
+                { label: 'B', value: sensorData?.amperage?.phase_b?.toFixed(1) || '0', color: 'bg-green-400' },
+                { label: 'C', value: sensorData?.amperage?.phase_c?.toFixed(1) || '0', color: 'bg-blue-400' },
+              ]}
+              sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.amperage?.average || 0 }))}
+              threshold={sensorData?.amperage?.imbalance_pct > 5 ? `Imbalance: ${sensorData?.amperage?.imbalance_pct?.toFixed(1)}%` : 'Imbalance < 5%'}
+            />
+            <MetricCard
+              title="Voltage"
+              value={sensorData?.voltage || 0}
+              unit="V"
+              icon={Gauge}
+              status={getMetricStatus('voltage', sensorData?.voltage)}
+              sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.voltage || 0 }))}
+              threshold="Normal: 380-420V"
+            />
+            <MetricCard
+              title="Vibration"
+              value={sensorData?.vibration || 0}
+              unit="mm/s"
+              icon={Activity}
+              status={getMetricStatus('vibration', sensorData?.vibration)}
+              sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.vibration || 0 }))}
+              threshold="Critical > 5 mm/s"
+            />
+            <MetricCard
+              title="Pressure"
+              value={sensorData?.pressure || 0}
+              unit="bar"
+              icon={Droplets}
+              status={getMetricStatus('pressure', sensorData?.pressure)}
+              sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.pressure || 0 }))}
+              threshold="Normal: 3-6 bar"
+            />
+            <MetricCard
+              title="Temperature"
+              value={sensorData?.temperature || 0}
+              unit="°C"
+              icon={Thermometer}
+              status={getMetricStatus('temperature', sensorData?.temperature)}
+              sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.temperature || 0 }))}
+              threshold="Max: 80°C"
+            />
+          </div>
+
+          {/* Live 3-Phase Chart */}
+          <LiveChart data={sensorHistory} activeFault={activeFault} />
+
+          {/* Multi-Sensor Trend Charts */}
+          <MultiSensorChart data={sensorHistory} />
+
+          {/* Fault Controls */}
+          <div className="glass rounded-xl p-4">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-amber-400" />
+                <h3 className="font-semibold text-white">🧪 Fault Injection Controls (Development Mode)</h3>
+              </div>
+              {activeFault !== 'NORMAL' && (
+                <div className="flex items-center gap-2 px-3 py-1 rounded-lg bg-red-500/20 border border-red-500/50">
+                  <span className="text-red-400 text-sm">🚨 Active: {activeFault.replace('_', ' ')}</span>
+                  <span className="text-red-300 text-xs">| Duration: {sensorData?.fault_duration?.toFixed(0) || 0}s</span>
+                </div>
+              )}
+            </div>
+            
+            <div className="grid grid-cols-6 gap-3">
+              {faultTypes.map(ft => (
+                <FaultButton
+                  key={ft.id}
+                  id={ft.id}
+                  name={ft.name}
+                  icon={ft.icon}
+                  active={activeFault === ft.id}
+                  onClick={handleInjectFault}
+                  disabled={!connected}
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* AI Diagnosis */}
+          <DiagnosisPanel
+            diagnosis={diagnosis}
+            isLoading={diagnosisLoading}
+            onRefresh={handleRefreshDiagnosis}
+          />
+        </div>
+
+        {/* Right: Chat (35%) */}
+        <div className="w-[35%]">
+          <ChatInterface
+            messages={chatMessages}
+            onSendMessage={handleSendMessage}
+            isLoading={chatLoading}
+          />
+        </div>
+      </div>
+
+      {/* Footer */}
+      <footer className="mt-8 text-center text-slate-500 text-sm">
+        <p>Digital Twin v1.0 • RAG-Enhanced Predictive Maintenance • Powered by Gemini 2.5</p>
+      </footer>
+    </div>
+  )
+}
+
+export default App
