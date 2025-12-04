@@ -2,13 +2,15 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { 
   Zap, Gauge, Activity, Thermometer, 
   Droplets, MessageSquare, AlertTriangle, 
-  CheckCircle, RefreshCw, Send, Bot, User
+  CheckCircle, RefreshCw, Send, Bot, User, Box,
+  X, Minimize2, Maximize2, Sparkles
 } from 'lucide-react'
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, 
   Tooltip, ResponsiveContainer, Legend, ReferenceLine,
   ReferenceArea, AreaChart, Area, ComposedChart
 } from 'recharts'
+import PumpViewer3D from './components/PumpViewer3D'
 
 // API Base URL
 const API_BASE = ''  // Empty for Vite proxy
@@ -180,19 +182,38 @@ function DiagnosisPanel({ diagnosis, isLoading, onRefresh }) {
 }
 
 // =====================================================
-// Chat Interface Component
+// Floating Chatbox Component
 // =====================================================
-function ChatInterface({ onSendMessage, messages, isLoading }) {
+function FloatingChatbox({ messages, onSendMessage, isLoading }) {
+  const [isOpen, setIsOpen] = useState(false)
+  const [isMinimized, setIsMinimized] = useState(false)
   const [input, setInput] = useState('')
+  const [unreadCount, setUnreadCount] = useState(0)
   const messagesEndRef = useRef(null)
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }
-
+  // Scroll to bottom when new messages arrive
   useEffect(() => {
-    scrollToBottom()
-  }, [messages])
+    if (isOpen && !isMinimized) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [messages, isOpen, isMinimized])
+
+  // Track unread messages when closed
+  useEffect(() => {
+    if (!isOpen && messages.length > 0) {
+      const lastMsg = messages[messages.length - 1]
+      if (lastMsg.role === 'assistant') {
+        setUnreadCount(prev => prev + 1)
+      }
+    }
+  }, [messages, isOpen])
+
+  // Clear unread when opened
+  useEffect(() => {
+    if (isOpen) {
+      setUnreadCount(0)
+    }
+  }, [isOpen])
 
   const handleSubmit = (e) => {
     e.preventDefault()
@@ -202,91 +223,196 @@ function ChatInterface({ onSendMessage, messages, isLoading }) {
     }
   }
 
+  const quickQuestions = [
+    "What's the current pump status?",
+    "How to fix cavitation?",
+    "Explain bearing wear symptoms",
+    "Maintenance schedule?"
+  ]
+
   return (
-    <div className="glass rounded-xl flex flex-col h-full">
-      {/* Header */}
-      <div className="flex items-center gap-2 p-4 border-b border-slate-700/50">
-        <MessageSquare className="w-5 h-5 text-cyan-400" />
-        <h3 className="font-semibold text-white">Maintenance Assistant</h3>
-      </div>
+    <>
+      {/* Floating Chat Button */}
+      {!isOpen && (
+        <button
+          onClick={() => setIsOpen(true)}
+          className="fixed bottom-6 right-6 w-16 h-16 bg-gradient-to-br from-cyan-500 to-blue-600 
+                     rounded-full shadow-lg shadow-cyan-500/30 flex items-center justify-center
+                     hover:scale-110 transition-all duration-300 z-50 group"
+        >
+          <Bot className="w-8 h-8 text-white" />
+          {unreadCount > 0 && (
+            <span className="absolute -top-1 -right-1 w-6 h-6 bg-red-500 rounded-full 
+                           flex items-center justify-center text-white text-xs font-bold
+                           animate-pulse">
+              {unreadCount}
+            </span>
+          )}
+          <span className="absolute right-full mr-3 px-3 py-1 bg-slate-800 text-white text-sm 
+                         rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+            AI Maintenance Assistant
+          </span>
+        </button>
+      )}
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-[300px] max-h-[400px]">
-        {messages.length === 0 ? (
-          <div className="text-center text-slate-500 text-sm py-8">
-            <Bot className="w-12 h-12 mx-auto mb-3 opacity-50" />
-            <p>Ask me anything about pump maintenance,</p>
-            <p>troubleshooting, or current sensor readings.</p>
-          </div>
-        ) : (
-          messages.map((msg, i) => (
-            <div
-              key={i}
-              className={`flex gap-3 slide-in ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-            >
-              {msg.role === 'assistant' && (
-                <div className="w-8 h-8 rounded-full bg-cyan-500/20 flex items-center justify-center flex-shrink-0">
-                  <Bot className="w-4 h-4 text-cyan-400" />
+      {/* Chat Window */}
+      {isOpen && (
+        <div 
+          className={`fixed bottom-6 right-6 z-50 transition-all duration-300 ease-out
+                      ${isMinimized ? 'w-72 h-14' : 'w-96 h-[600px]'}`}
+        >
+          <div className="w-full h-full bg-slate-900/95 backdrop-blur-xl rounded-2xl 
+                        border border-slate-700/50 shadow-2xl shadow-black/50 flex flex-col overflow-hidden">
+            
+            {/* Header */}
+            <div className="flex items-center justify-between p-4 bg-gradient-to-r from-cyan-500/20 to-blue-500/20 
+                          border-b border-slate-700/50">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-gradient-to-br from-cyan-400 to-blue-500 
+                              flex items-center justify-center">
+                  <Bot className="w-5 h-5 text-white" />
                 </div>
-              )}
-              <div
-                className={`max-w-[80%] rounded-xl px-4 py-2 ${
-                  msg.role === 'user'
-                    ? 'bg-blue-500/20 text-blue-100'
-                    : 'bg-slate-700/50 text-slate-200'
-                }`}
-              >
-                <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                <div>
+                  <h3 className="font-semibold text-white text-sm">Maintenance AI</h3>
+                  <div className="flex items-center gap-1">
+                    <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
+                    <span className="text-xs text-green-400">Online • Gemini 2.5</span>
+                  </div>
+                </div>
               </div>
-              {msg.role === 'user' && (
-                <div className="w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center flex-shrink-0">
-                  <User className="w-4 h-4 text-blue-400" />
-                </div>
-              )}
-            </div>
-          ))
-        )}
-        {isLoading && (
-          <div className="flex gap-3 slide-in">
-            <div className="w-8 h-8 rounded-full bg-cyan-500/20 flex items-center justify-center">
-              <Bot className="w-4 h-4 text-cyan-400" />
-            </div>
-            <div className="bg-slate-700/50 rounded-xl px-4 py-2">
-              <div className="flex gap-1">
-                <span className="w-2 h-2 bg-cyan-400 rounded-full animate-bounce"></span>
-                <span className="w-2 h-2 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></span>
-                <span className="w-2 h-2 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></span>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setIsMinimized(!isMinimized)}
+                  className="p-2 hover:bg-slate-700/50 rounded-lg transition-colors"
+                >
+                  {isMinimized ? (
+                    <Maximize2 className="w-4 h-4 text-slate-400" />
+                  ) : (
+                    <Minimize2 className="w-4 h-4 text-slate-400" />
+                  )}
+                </button>
+                <button
+                  onClick={() => setIsOpen(false)}
+                  className="p-2 hover:bg-red-500/20 rounded-lg transition-colors"
+                >
+                  <X className="w-4 h-4 text-slate-400 hover:text-red-400" />
+                </button>
               </div>
             </div>
-          </div>
-        )}
-        <div ref={messagesEndRef} />
-      </div>
 
-      {/* Input */}
-      <form onSubmit={handleSubmit} className="p-4 border-t border-slate-700/50">
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask about maintenance..."
-            className="flex-1 bg-slate-800/50 border border-slate-700/50 rounded-lg px-4 py-2 
-                       text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500/50
-                       transition-colors"
-          />
-          <button
-            type="submit"
-            disabled={!input.trim() || isLoading}
-            className="px-4 py-2 bg-cyan-500/20 border border-cyan-500/50 rounded-lg
-                       text-cyan-400 hover:bg-cyan-500/30 transition-colors
-                       disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <Send className="w-4 h-4" />
-          </button>
+            {/* Chat Content (hidden when minimized) */}
+            {!isMinimized && (
+              <>
+                {/* Messages */}
+                <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                  {messages.length === 0 ? (
+                    <div className="text-center py-6">
+                      <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-gradient-to-br from-cyan-500/20 to-blue-500/20 
+                                    flex items-center justify-center">
+                        <Sparkles className="w-8 h-8 text-cyan-400" />
+                      </div>
+                      <h4 className="text-white font-medium mb-2">AI Maintenance Assistant</h4>
+                      <p className="text-slate-400 text-sm mb-4">
+                        Ask me anything about the Grundfos CR pump, troubleshooting, or current sensor readings.
+                      </p>
+                      
+                      {/* Quick Questions */}
+                      <div className="space-y-2">
+                        <p className="text-xs text-slate-500">Quick questions:</p>
+                        <div className="flex flex-wrap gap-2 justify-center">
+                          {quickQuestions.map((q, i) => (
+                            <button
+                              key={i}
+                              onClick={() => onSendMessage(q)}
+                              className="px-3 py-1.5 bg-slate-800/50 border border-slate-700/50 
+                                       rounded-full text-xs text-slate-300 hover:bg-cyan-500/20 
+                                       hover:border-cyan-500/50 hover:text-cyan-300 transition-all"
+                            >
+                              {q}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    messages.map((msg, i) => (
+                      <div
+                        key={i}
+                        className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                      >
+                        {msg.role === 'assistant' && (
+                          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-400 to-blue-500 
+                                        flex items-center justify-center flex-shrink-0">
+                            <Bot className="w-4 h-4 text-white" />
+                          </div>
+                        )}
+                        <div
+                          className={`max-w-[85%] rounded-2xl px-4 py-2.5 ${
+                            msg.role === 'user'
+                              ? 'bg-gradient-to-r from-cyan-500 to-blue-500 text-white'
+                              : 'bg-slate-800/80 text-slate-200 border border-slate-700/50'
+                          }`}
+                        >
+                          <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                        </div>
+                        {msg.role === 'user' && (
+                          <div className="w-8 h-8 rounded-full bg-slate-700 
+                                        flex items-center justify-center flex-shrink-0">
+                            <User className="w-4 h-4 text-slate-300" />
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
+                  
+                  {/* Typing Indicator */}
+                  {isLoading && (
+                    <div className="flex gap-3">
+                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-400 to-blue-500 
+                                    flex items-center justify-center">
+                        <Bot className="w-4 h-4 text-white" />
+                      </div>
+                      <div className="bg-slate-800/80 rounded-2xl px-4 py-3 border border-slate-700/50">
+                        <div className="flex gap-1.5">
+                          <span className="w-2 h-2 bg-cyan-400 rounded-full animate-bounce"></span>
+                          <span className="w-2 h-2 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: '0.15s' }}></span>
+                          <span className="w-2 h-2 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: '0.3s' }}></span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  <div ref={messagesEndRef} />
+                </div>
+
+                {/* Input */}
+                <form onSubmit={handleSubmit} className="p-4 border-t border-slate-700/50 bg-slate-900/50">
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={input}
+                      onChange={(e) => setInput(e.target.value)}
+                      placeholder="Type your message..."
+                      className="flex-1 bg-slate-800/50 border border-slate-700/50 rounded-xl px-4 py-3 
+                               text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500/50
+                               focus:ring-2 focus:ring-cyan-500/20 transition-all text-sm"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!input.trim() || isLoading}
+                      className="px-4 py-3 bg-gradient-to-r from-cyan-500 to-blue-500 rounded-xl
+                               text-white hover:shadow-lg hover:shadow-cyan-500/30 transition-all
+                               disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:shadow-none"
+                    >
+                      <Send className="w-4 h-4" />
+                    </button>
+                  </div>
+                </form>
+              </>
+            )}
+          </div>
         </div>
-      </form>
-    </div>
+      )}
+    </>
   )
 }
 
@@ -780,62 +906,89 @@ function App() {
         </div>
       </header>
 
-      {/* Main Layout: 65% Dashboard | 35% Chat */}
+      {/* Main Layout: Full Width Dashboard */}
       <div className="flex gap-6">
-        {/* Left: Dashboard (65%) */}
-        <div className="w-[65%] space-y-6">
-          {/* Sensor Metrics with Sparklines */}
-          <div className="grid grid-cols-5 gap-4">
-            <MetricCard
-              title="Amperage"
-              value={sensorData?.amperage?.average || 0}
-              unit="A"
-              icon={Zap}
-              status={getMetricStatus('amperage', sensorData?.amperage?.average)}
-              subValues={[
-                { label: 'A', value: sensorData?.amperage?.phase_a?.toFixed(1) || '0', color: 'bg-red-400' },
-                { label: 'B', value: sensorData?.amperage?.phase_b?.toFixed(1) || '0', color: 'bg-green-400' },
-                { label: 'C', value: sensorData?.amperage?.phase_c?.toFixed(1) || '0', color: 'bg-blue-400' },
-              ]}
-              sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.amperage?.average || 0 }))}
-              threshold={sensorData?.amperage?.imbalance_pct > 5 ? `Imbalance: ${sensorData?.amperage?.imbalance_pct?.toFixed(1)}%` : 'Imbalance < 5%'}
-            />
-            <MetricCard
-              title="Voltage"
-              value={sensorData?.voltage || 0}
-              unit="V"
-              icon={Gauge}
-              status={getMetricStatus('voltage', sensorData?.voltage)}
-              sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.voltage || 0 }))}
-              threshold="Normal: 380-420V"
-            />
-            <MetricCard
-              title="Vibration"
-              value={sensorData?.vibration || 0}
-              unit="mm/s"
-              icon={Activity}
-              status={getMetricStatus('vibration', sensorData?.vibration)}
-              sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.vibration || 0 }))}
-              threshold="Critical > 5 mm/s"
-            />
-            <MetricCard
-              title="Pressure"
-              value={sensorData?.pressure || 0}
-              unit="bar"
-              icon={Droplets}
-              status={getMetricStatus('pressure', sensorData?.pressure)}
-              sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.pressure || 0 }))}
-              threshold="Normal: 3-6 bar"
-            />
-            <MetricCard
-              title="Temperature"
-              value={sensorData?.temperature || 0}
-              unit="°C"
-              icon={Thermometer}
-              status={getMetricStatus('temperature', sensorData?.temperature)}
-              sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.temperature || 0 }))}
-              threshold="Max: 80°C"
-            />
+        {/* Dashboard (Full Width) */}
+        <div className="w-full space-y-6">
+          {/* Top Row: 3D Model + Sensor Metrics */}
+          <div className="flex gap-4">
+            {/* 3D Pump Viewer */}
+            <div className="w-[25%]">
+              <div className="glass rounded-xl overflow-hidden h-[280px]">
+                <div className="flex items-center gap-2 p-3 border-b border-slate-700/50">
+                  <Box className="w-4 h-4 text-cyan-400" />
+                  <h3 className="font-semibold text-white text-sm">3D Pump Model</h3>
+                </div>
+                <PumpViewer3D 
+                  faultState={activeFault} 
+                  sensorData={sensorData}
+                  className="h-[240px]"
+                />
+              </div>
+            </div>
+
+            {/* Sensor Metrics with Sparklines */}
+            <div className="w-[75%] grid grid-cols-3 gap-3">
+              <MetricCard
+                title="Amperage"
+                value={sensorData?.amperage?.average || 0}
+                unit="A"
+                icon={Zap}
+                status={getMetricStatus('amperage', sensorData?.amperage?.average)}
+                subValues={[
+                  { label: 'A', value: sensorData?.amperage?.phase_a?.toFixed(1) || '0', color: 'bg-red-400' },
+                  { label: 'B', value: sensorData?.amperage?.phase_b?.toFixed(1) || '0', color: 'bg-green-400' },
+                  { label: 'C', value: sensorData?.amperage?.phase_c?.toFixed(1) || '0', color: 'bg-blue-400' },
+                ]}
+                sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.amperage?.average || 0 }))}
+                threshold={sensorData?.amperage?.imbalance_pct > 5 ? `Imbalance: ${sensorData?.amperage?.imbalance_pct?.toFixed(1)}%` : 'Imbalance < 5%'}
+              />
+              <MetricCard
+                title="Voltage"
+                value={sensorData?.voltage || 0}
+                unit="V"
+                icon={Gauge}
+                status={getMetricStatus('voltage', sensorData?.voltage)}
+                sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.voltage || 0 }))}
+                threshold="Normal: 380-420V"
+              />
+              <MetricCard
+                title="Vibration"
+                value={sensorData?.vibration || 0}
+                unit="mm/s"
+                icon={Activity}
+                status={getMetricStatus('vibration', sensorData?.vibration)}
+                sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.vibration || 0 }))}
+                threshold="Critical > 5 mm/s"
+              />
+              <MetricCard
+                title="Pressure"
+                value={sensorData?.pressure || 0}
+                unit="bar"
+                icon={Droplets}
+                status={getMetricStatus('pressure', sensorData?.pressure)}
+                sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.pressure || 0 }))}
+                threshold="Normal: 3-6 bar"
+              />
+              <MetricCard
+                title="Temperature"
+                value={sensorData?.temperature || 0}
+                unit="°C"
+                icon={Thermometer}
+                status={getMetricStatus('temperature', sensorData?.temperature)}
+                sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.temperature || 0 }))}
+                threshold="Max: 80°C"
+              />
+              <MetricCard
+                title="Fault State"
+                value={activeFault === 'NORMAL' ? 'OK' : activeFault.replace('_', ' ')}
+                unit=""
+                icon={activeFault === 'NORMAL' ? CheckCircle : AlertTriangle}
+                status={activeFault === 'NORMAL' ? 'success' : 'danger'}
+                sparklineData={[]}
+                threshold={sensorData?.fault_duration ? `Duration: ${sensorData?.fault_duration?.toFixed(0)}s` : 'System Normal'}
+              />
+            </div>
           </div>
 
           {/* Live 3-Phase Chart */}
@@ -881,16 +1034,14 @@ function App() {
             onRefresh={handleRefreshDiagnosis}
           />
         </div>
-
-        {/* Right: Chat (35%) */}
-        <div className="w-[35%]">
-          <ChatInterface
-            messages={chatMessages}
-            onSendMessage={handleSendMessage}
-            isLoading={chatLoading}
-          />
-        </div>
       </div>
+
+      {/* Floating Chatbox */}
+      <FloatingChatbox
+        messages={chatMessages}
+        onSendMessage={handleSendMessage}
+        isLoading={chatLoading}
+      />
 
       {/* Footer */}
       <footer className="mt-8 text-center text-slate-500 text-sm">
