@@ -1,6 +1,10 @@
 """
 FastAPI Backend for Digital Twin Dashboard
 Real-time WebSocket API for sensor data streaming and AI diagnostics
+
+Supports dual data sources:
+- Python simulation (PumpSimulator)
+- MATLAB/Simulink via TCP (MATLABBridge)
 """
 
 import os
@@ -8,8 +12,12 @@ import sys
 import json
 import asyncio
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Union
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,13 +30,23 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.simulator import PumpSimulator, FaultType
 from src.ai_agent import MaintenanceAIAgent
+from src.matlab_bridge import MATLABBridge, HybridSimulator, MATLABBridgeConfig
+from src.config import get_config, DataSource, DigitalTwinConfig
+from backend.fault_scenarios import (
+    FAULT_SCENARIOS, StateTransitionManager, 
+    get_scenarios_for_ui, get_scenario_details,
+    get_fault_progression, get_full_progression_chain
+)
 
 # Global instances
-pump_simulator: Optional[PumpSimulator] = None
+pump_simulator: Optional[Union[PumpSimulator, HybridSimulator]] = None
+matlab_bridge: Optional[MATLABBridge] = None
 ai_agent: Optional[MaintenanceAIAgent] = None
 active_connections: List[WebSocket] = []
 sensor_history: List[Dict] = []
 MAX_HISTORY = 60  # Keep last 60 seconds
+current_data_source: DataSource = DataSource.PYTHON
+state_manager: StateTransitionManager = StateTransitionManager()  # New state manager
 
 
 # Pydantic models for API
@@ -42,18 +60,46 @@ class ChatRequest(BaseModel):
 class DiagnosticRequest(BaseModel):
     sensor_data: Dict
 
+class DataSourceRequest(BaseModel):
+    source: str  # 'python' or 'matlab'
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize resources on startup"""
-    global pump_simulator, ai_agent
+    global pump_simulator, matlab_bridge, ai_agent, current_data_source
     
     print("\n" + "="*60)
     print("🚀 Starting Digital Twin Backend Server")
     print("="*60 + "\n")
     
-    # Initialize simulator
-    pump_simulator = PumpSimulator()
+    # Load configuration
+    config = get_config()
+    current_data_source = config.data_source
+    
+    print(f"📊 Data Source: {current_data_source.value.upper()}")
+    
+    # Initialize based on data source
+    if current_data_source == DataSource.MATLAB:
+        # Initialize MATLAB bridge directly (not through HybridSimulator to avoid double binding)
+        print("🌉 Initializing MATLAB Bridge...")
+        matlab_config = MATLABBridgeConfig(
+            host=config.tcp.host,
+            port=config.tcp.port
+        )
+        matlab_bridge = MATLABBridge(matlab_config)
+        
+        if matlab_bridge.start_server():
+            # Use bridge directly as pump_simulator (same interface)
+            pump_simulator = matlab_bridge
+            print("✅ MATLAB Bridge ready - waiting for MATLAB connection on port 5555")
+        else:
+            print("⚠️  MATLAB Bridge failed, falling back to Python simulator")
+            pump_simulator = PumpSimulator()
+            current_data_source = DataSource.PYTHON
+    else:
+        # Initialize Python simulator
+        pump_simulator = PumpSimulator()
     
     # Initialize AI agent (may take a few seconds for embeddings)
     try:
@@ -69,6 +115,9 @@ async def lifespan(app: FastAPI):
     
     # Cleanup
     print("\n🛑 Shutting down Digital Twin Backend...")
+    
+    if matlab_bridge:
+        matlab_bridge.stop_server()
 
 
 # Create FastAPI app
@@ -100,8 +149,81 @@ async def root():
         "status": "online",
         "service": "Digital Twin API",
         "version": "1.0.0",
+        "data_source": current_data_source.value,
+        "matlab_connected": matlab_bridge.is_connected() if matlab_bridge else False,
         "timestamp": datetime.now().isoformat()
     }
+
+
+@app.get("/api/status")
+async def get_status():
+    """Get detailed system status"""
+    status = {
+        "data_source": current_data_source.value,
+        "simulator_active": pump_simulator is not None,
+        "ai_agent_active": ai_agent is not None,
+        "active_connections": len(active_connections),
+        "history_length": len(sensor_history),
+    }
+    
+    if matlab_bridge:
+        status["matlab"] = matlab_bridge.get_status()
+    
+    return status
+
+
+@app.post("/api/switch-source")
+async def switch_data_source(request: DataSourceRequest):
+    """Switch between Python and MATLAB data sources"""
+    global pump_simulator, matlab_bridge, current_data_source
+    
+    new_source = request.source.lower()
+    
+    if new_source not in ['python', 'matlab']:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid source. Use 'python' or 'matlab'"
+        )
+    
+    if new_source == current_data_source.value:
+        return {"status": "unchanged", "source": current_data_source.value}
+    
+    try:
+        if new_source == 'matlab':
+            # Switch to MATLAB
+            if not matlab_bridge:
+                config = get_config()
+                matlab_config = MATLABBridgeConfig(
+                    host=config.tcp.host,
+                    port=config.tcp.port
+                )
+                matlab_bridge = MATLABBridge(matlab_config)
+            
+            if matlab_bridge.start_server():
+                pump_simulator = HybridSimulator(source='matlab')
+                pump_simulator.start()
+                current_data_source = DataSource.MATLAB
+            else:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Failed to start MATLAB bridge"
+                )
+        else:
+            # Switch to Python
+            if matlab_bridge:
+                matlab_bridge.stop_server()
+            
+            pump_simulator = PumpSimulator()
+            current_data_source = DataSource.PYTHON
+        
+        return {
+            "status": "switched",
+            "source": current_data_source.value,
+            "message": f"Now using {current_data_source.value.upper()} data source"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/sensor-data")
@@ -122,32 +244,93 @@ async def get_sensor_history():
 
 @app.post("/api/inject-fault")
 async def inject_fault(request: FaultRequest):
-    """Inject a fault condition into the simulator"""
+    """
+    Inject a fault condition with state transition logic.
+    
+    Transition rules:
+    - From NORMAL: Can go to any state
+    - From LOW/MEDIUM/HIGH: Can go to NORMAL (repair) or higher severity
+    - From CRITICAL: Can ONLY go to NORMAL (repair required)
+    """
+    global state_manager
+    
     if pump_simulator is None:
         raise HTTPException(status_code=503, detail="Simulator not initialized")
     
-    fault_mapping = {
-        "NORMAL": FaultType.NORMAL,
-        "WINDING_DEFECT": FaultType.WINDING_DEFECT,
-        "SUPPLY_FAULT": FaultType.SUPPLY_FAULT,
-        "CAVITATION": FaultType.CAVITATION,
-        "BEARING_WEAR": FaultType.BEARING_WEAR,
-        "OVERLOAD": FaultType.OVERLOAD,
-    }
+    target_state = request.fault_type.upper()
     
-    fault_type = fault_mapping.get(request.fault_type.upper())
-    if fault_type is None:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Invalid fault type. Valid options: {list(fault_mapping.keys())}"
-        )
+    # Check if transition is allowed
+    can_go, reason = state_manager.can_transition_to(target_state)
     
-    if fault_type == FaultType.NORMAL:
-        pump_simulator.reset_fault()
-        return {"status": "success", "message": "System reset to normal operation"}
+    if not can_go:
+        # Return a user-friendly error with current state info
+        current = state_manager.get_current_scenario()
+        return {
+            "status": "blocked",
+            "success": False,
+            "message": reason,
+            "current_state": {
+                "id": current.id,
+                "display_name": current.display_name,
+                "severity": current.severity.value,
+                "severity_name": current.severity.name,
+            },
+            "allowed_transitions": state_manager.get_allowed_transitions(),
+            "hint": "💡 Cliquez sur 'Fonctionnement Normal' pour réparer/réinitialiser la pompe avant de simuler un autre défaut."
+        }
+    
+    # Perform the transition
+    success, message, scenario = state_manager.transition_to(target_state)
+    
+    if success:
+        # Map to old FaultType enum for backward compatibility with simulator
+        fault_mapping = {
+            "NORMAL": FaultType.NORMAL,
+            "WINDING_DEFECT": FaultType.WINDING_DEFECT,
+            "SUPPLY_FAULT": FaultType.SUPPLY_FAULT,
+            "CAVITATION": FaultType.CAVITATION,
+            "BEARING_WEAR": FaultType.BEARING_WEAR,
+            "OVERLOAD": FaultType.OVERLOAD,
+            # New states map to closest existing FaultType
+            "FILTER_CLOGGING": FaultType.CAVITATION,  # Similar hydraulic effect
+            "MINOR_VIBRATION": FaultType.BEARING_WEAR,  # Mechanical
+            "IMPELLER_WEAR": FaultType.CAVITATION,  # Hydraulic
+            "SEAL_LEAK": FaultType.BEARING_WEAR,  # Mechanical
+            "PUMP_SEIZURE": FaultType.OVERLOAD,  # Critical
+        }
+        
+        fault_type = fault_mapping.get(target_state, FaultType.NORMAL)
+        
+        if fault_type == FaultType.NORMAL:
+            pump_simulator.reset_fault()
+        else:
+            pump_simulator.inject_fault(fault_type)
+        
+        return {
+            "status": "success",
+            "success": True,
+            "message": message,
+            "scenario": {
+                "id": scenario.id,
+                "display_name": scenario.display_name,
+                "icon": scenario.icon,
+                "severity": scenario.severity.value,
+                "severity_name": scenario.severity.name,
+                "description": scenario.description,
+                "symptoms": scenario.symptoms,
+                "causes": scenario.causes,
+                "repair_action": scenario.repair_action,
+                "maintenance_time": scenario.maintenance_time,
+            },
+            "current_state": target_state,
+            "is_repair": target_state == "NORMAL",
+        }
     else:
-        pump_simulator.inject_fault(fault_type)
-        return {"status": "success", "message": f"Fault injected: {fault_type.value}"}
+        return {
+            "status": "error",
+            "success": False,
+            "message": message
+        }
 
 
 @app.post("/api/emergency-stop")
@@ -167,9 +350,162 @@ async def emergency_stop():
     }
 
 
+@app.get("/api/fault-progression/{scenario_id}")
+async def get_progression(scenario_id: str):
+    """
+    Get predictive fault progression for a scenario.
+    
+    Returns what faults can develop from the current fault if not fixed,
+    sorted by probability (highest first). Based on Grundfos manual causality chains.
+    
+    Example: FILTER_CLOGGING can progress to:
+    - CAVITATION (65% likely) - within 2-4 hours
+    - IMPELLER_WEAR (25% likely) - within 1-2 weeks
+    - OVERLOAD (10% likely) - within 4-8 hours
+    """
+    progressions = get_fault_progression(scenario_id)
+    
+    if not progressions:
+        return {
+            "scenario_id": scenario_id,
+            "progressions": [],
+            "message": "No further progression - this is either a terminal state or normal operation"
+        }
+    
+    return {
+        "scenario_id": scenario_id,
+        "progressions": progressions,
+        "total_paths": len(progressions)
+    }
+
+
+@app.get("/api/fault-tree/{scenario_id}")
+async def get_progression_tree(scenario_id: str, depth: int = 3):
+    """
+    Get the full fault progression tree from a scenario.
+    
+    Shows all possible paths to failure if the current fault is not addressed.
+    Useful for visualizing the complete risk chain in UML-style diagram.
+    
+    Args:
+        scenario_id: Starting fault ID
+        depth: How many levels deep to explore (default 3)
+    """
+    from backend.fault_scenarios import FAULT_SCENARIOS, get_fault_progression
+    
+    scenario = FAULT_SCENARIOS.get(scenario_id)
+    if not scenario:
+        return {
+            "error": f"Unknown scenario: {scenario_id}"
+        }
+    
+    # Get direct progressions
+    progressions = get_fault_progression(scenario_id)
+    
+    # Build flat paths for UML-style display
+    paths = []
+    for prog in progressions:
+        paths.append({
+            "fault": prog["target_fault"],
+            "name": prog["target_name"],
+            "icon": prog.get("target_icon", "⚠️"),
+            "probability": prog["probability"],
+            "severity": prog["target_severity"],
+            "time_to_progress": prog["time_to_progress"],
+            "trigger_conditions": prog["trigger_conditions"],
+            "prevention_action": prog.get("prevention_action", "Monitor and address root cause")
+        })
+    
+    return {
+        "root_fault": scenario_id,
+        "root_name": scenario.display_name,
+        "root_icon": scenario.icon,
+        "root_severity": scenario.severity.value,
+        "root_description": scenario.description,
+        "paths": sorted(paths, key=lambda x: x["probability"], reverse=True),
+        "repair_action": scenario.repair_action,
+        "maintenance_time": scenario.maintenance_time
+    }
+
+
+@app.get("/api/manual-guide/{scenario_id}")
+async def get_manual_guide(scenario_id: str):
+    """
+    Get troubleshooting guide data by QUERYING the Grundfos manual via RAG.
+    
+    This actually searches the PDF manual and returns relevant information.
+    NO pre-defined data, everything comes from the manual.
+    """
+    from backend.fault_scenarios import FAULT_SCENARIOS
+    
+    scenario = FAULT_SCENARIOS.get(scenario_id)
+    if not scenario:
+        return None
+    
+    # Use RAG to query the manual for this specific fault
+    if ai_agent is None or ai_agent.rag_engine is None:
+        return {
+            "id": scenario.id,
+            "name": scenario.display_name,
+            "icon": scenario.icon,
+            "severity": scenario.severity.value,
+            "description": scenario.description,
+            "error": "RAG engine not available",
+            "symptoms": [],
+            "causes": [],
+            "corrective_actions": [],
+            "manual_references": []
+        }
+    
+    # Build query for RAG based on fault type
+    fault_name = scenario.name.lower()
+    rag_query = f"{fault_name} symptoms causes troubleshooting corrective actions"
+    
+    # Query the knowledge base (the actual Grundfos PDF)
+    retrieved_chunks = ai_agent.rag_engine.query_knowledge_base(
+        query=rag_query,
+        top_k=5
+    )
+    
+    # Extract the raw text from manual
+    # Chunks are dicts with keys: 'content', 'page', 'source', 'score'
+    manual_content = []
+    manual_references = []
+    for chunk in retrieved_chunks:
+        # Handle both dict format and Document object format
+        if isinstance(chunk, dict):
+            content = chunk.get('content', '')
+            page = chunk.get('page', '')
+            source = chunk.get('source', '')
+        else:
+            content = chunk.page_content if hasattr(chunk, 'page_content') else str(chunk)
+            page = chunk.metadata.get('page', '') if hasattr(chunk, 'metadata') else ''
+            source = chunk.metadata.get('source', '') if hasattr(chunk, 'metadata') else ''
+        
+        manual_content.append(content)
+        if page or source:
+            ref = f"Page {page}" if page else source
+            if ref not in manual_references:
+                manual_references.append(ref)
+    
+    # Combine all retrieved content
+    combined_content = "\n\n".join(manual_content)
+    
+    return {
+        "id": scenario.id,
+        "name": scenario.display_name,
+        "icon": scenario.icon,
+        "severity": scenario.severity.value,
+        "description": f"Information retrieved from Grundfos manual for: {scenario.name}",
+        "manual_content": combined_content,
+        "manual_references": manual_references,
+        "query_used": rag_query
+    }
+
+
 @app.post("/api/diagnose")
 async def get_diagnosis(request: DiagnosticRequest):
-    """Get AI diagnostic for current sensor data including shutdown decision"""
+    """Get AI diagnostic for current sensor data including shutdown decision, detected scenario, and fault progressions"""
     if ai_agent is None:
         raise HTTPException(status_code=503, detail="AI Agent not initialized")
     
@@ -179,9 +515,21 @@ async def get_diagnosis(request: DiagnosticRequest):
         # Extract shutdown decision
         shutdown = result.get("shutdown_decision", {})
         
+        # Extract detected scenario
+        detected = result.get("detected_scenario", {})
+        
+        # Extract fault progressions (predictive analysis)
+        progressions = result.get("fault_progressions", [])
+        
         return {
             "diagnosis": result["diagnosis"],
             "fault_detected": result["fault_detected"],
+            "detected_scenario": {
+                "id": detected.get("id", "UNKNOWN"),
+                "confidence": detected.get("confidence", 0),
+                "info": detected.get("info", {})
+            },
+            "fault_progressions": progressions,  # NEW: What can go wrong next
             "shutdown_decision": {
                 "action": shutdown.get("action", "NORMAL_OPERATION"),
                 "urgency": shutdown.get("urgency", "OK"),
@@ -193,13 +541,21 @@ async def get_diagnosis(request: DiagnosticRequest):
                 "critical_conditions": shutdown.get("critical_conditions", []),
                 "warning_conditions": shutdown.get("warning_conditions", [])
             },
+            "sensor_summary": result.get("sensor_summary", {}),
             "references": [
                 {"page": c["page"], "score": c["score"]} 
                 for c in result["context_used"]
             ]
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        error_str = str(e)
+        # Check for API quota errors (429)
+        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
+            raise HTTPException(
+                status_code=429, 
+                detail="API quota exhausted. Please wait a few minutes before retrying."
+            )
+        raise HTTPException(status_code=500, detail=error_str)
 
 
 @app.post("/api/chat")
@@ -224,16 +580,64 @@ async def chat(request: ChatRequest):
 
 @app.get("/api/fault-types")
 async def get_fault_types():
-    """Get list of available fault types"""
+    """Get list of available fault scenarios with state transition info"""
+    current = state_manager.get_current_scenario()
+    allowed = state_manager.get_allowed_transitions()
+    
     return {
+        "current_state": {
+            "id": current.id,
+            "display_name": current.display_name,
+            "severity": current.severity.value,
+            "severity_name": current.severity.name,
+        },
+        "allowed_transitions": allowed,
+        "scenarios": get_scenarios_for_ui(),
+        # Legacy format for backward compatibility
         "fault_types": [
-            {"id": "NORMAL", "name": "Normal Operation", "icon": "✅"},
-            {"id": "WINDING_DEFECT", "name": "Winding Defect", "icon": "⚡"},
-            {"id": "SUPPLY_FAULT", "name": "Supply Fault", "icon": "🔌"},
-            {"id": "CAVITATION", "name": "Cavitation", "icon": "💧"},
-            {"id": "BEARING_WEAR", "name": "Bearing Wear", "icon": "⚙️"},
-            {"id": "OVERLOAD", "name": "Overload", "icon": "🔥"},
+            {
+                "id": s.id, 
+                "name": s.display_name, 
+                "icon": s.icon,
+                "severity": s.severity.value,
+                "can_select": s.id in allowed,
+            }
+            for s in FAULT_SCENARIOS.values()
         ]
+    }
+
+
+@app.get("/api/scenario/{scenario_id}")
+async def get_scenario(scenario_id: str):
+    """Get detailed information about a specific fault scenario"""
+    details = get_scenario_details(scenario_id.upper())
+    if not details:
+        raise HTTPException(status_code=404, detail=f"Scenario not found: {scenario_id}")
+    
+    # Add transition info
+    can_go, reason = state_manager.can_transition_to(scenario_id.upper())
+    details["can_activate"] = can_go
+    details["transition_message"] = reason
+    
+    return details
+
+
+@app.get("/api/current-state")
+async def get_current_state():
+    """Get current fault state and available transitions"""
+    current = state_manager.get_current_scenario()
+    return {
+        "current": {
+            "id": current.id,
+            "display_name": current.display_name,
+            "icon": current.icon,
+            "severity": current.severity.value,
+            "severity_name": current.severity.name,
+            "description": current.description,
+            "symptoms": current.symptoms,
+            "repair_action": current.repair_action,
+        },
+        "allowed_transitions": state_manager.get_allowed_transitions(),
     }
 
 
@@ -257,22 +661,44 @@ async def websocket_sensor_stream(websocket: WebSocket):
                 # Get current reading
                 reading = pump_simulator.get_sensor_reading()
                 
+                # Add MATLAB connection status
+                matlab_status = False
+                if matlab_bridge and hasattr(matlab_bridge, 'is_connected'):
+                    matlab_status = matlab_bridge.is_connected()
+                elif matlab_bridge and hasattr(matlab_bridge, 'state'):
+                    from src.matlab_bridge import ConnectionState
+                    matlab_status = matlab_bridge.state == ConnectionState.CONNECTED
+                
                 # Add to history
                 sensor_history.append(reading)
                 if len(sensor_history) > MAX_HISTORY:
                     sensor_history.pop(0)
                 
-                # Send to client
+                # Get current scenario from state manager
+                current_scenario = state_manager.get_current_scenario()
+                
+                # Send to client with connection info AND current scenario state
                 await websocket.send_json({
                     "type": "sensor_update",
                     "data": reading,
-                    "history_length": len(sensor_history)
+                    "history_length": len(sensor_history),
+                    "data_source": current_data_source.value,
+                    "matlab_connected": matlab_status,
+                    # Add scenario state for frontend sync
+                    "scenario_state": {
+                        "id": current_scenario.id,
+                        "display_name": current_scenario.display_name,
+                        "icon": current_scenario.icon,
+                        "severity": current_scenario.severity.value,
+                        "severity_name": current_scenario.severity.name,
+                    }
                 })
             
             await asyncio.sleep(1)  # 1 Hz update rate
             
     except WebSocketDisconnect:
-        active_connections.remove(websocket)
+        if websocket in active_connections:
+            active_connections.remove(websocket)
         print(f"📴 Client disconnected. Total connections: {len(active_connections)}")
 
 

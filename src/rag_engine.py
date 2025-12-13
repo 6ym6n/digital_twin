@@ -4,6 +4,7 @@ Handles PDF loading, embeddings, and vector retrieval using ChromaDB
 """
 
 import os
+from pathlib import Path
 from typing import List, Dict
 from dotenv import load_dotenv
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -14,6 +15,11 @@ from langchain_community.vectorstores import Chroma
 # Load environment variables
 load_dotenv()
 
+# Get the project root directory (parent of src/)
+PROJECT_ROOT = Path(__file__).parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
+DEFAULT_PDF_PATH = DATA_DIR / "grundfos-cr-pump-troubleshooting.pdf"
+
 class RAGEngine:
     """
     Manages the Retrieval-Augmented Generation knowledge base
@@ -22,10 +28,15 @@ class RAGEngine:
     
     def __init__(
         self, 
-        pdf_path: str = "../data/grundfos-cr-pump-troubleshooting.pdf",
-        persist_directory: str = "./chroma_db",
+        pdf_path: str = None,
+        persist_directory: str = None,
         collection_name: str = "pump_manual"
     ):
+        # Use default paths relative to project root if not specified
+        if pdf_path is None:
+            pdf_path = str(DEFAULT_PDF_PATH)
+        if persist_directory is None:
+            persist_directory = str(PROJECT_ROOT / "chroma_db")
         """
         Initialize the RAG engine with PDF document and vector store.
         

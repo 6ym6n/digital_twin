@@ -25,7 +25,7 @@ class PumpSimulator:
     
     Sensor Parameters:
     - Amperage (3-Phase): Normal operation with balanced phases
-    - Voltage: 230V nominal (3-phase supply)
+    - Voltage: 400V nominal (3-phase supply) - European standard
     - Vibration: Normal <2mm/s, Alert >5mm/s
     - Pressure: Nominal operating pressure with fluctuations
     - Temperature: Motor winding temperature
@@ -33,7 +33,7 @@ class PumpSimulator:
     
     def __init__(
         self,
-        nominal_voltage: float = 230.0,
+        nominal_voltage: float = 400.0,  # 400V 3-phase European standard
         nominal_current: float = 10.0,
         nominal_vibration: float = 1.5,
         nominal_pressure: float = 5.0,
@@ -117,20 +117,20 @@ class PumpSimulator:
         """
         Generate supply voltage based on fault state.
         
-        Normal: ~230V (±2%)
-        Supply Fault (Page 9): <207V (10% drop)
+        Normal: ~400V (±2%) for 3-phase system
+        Supply Fault: 340-370V (10-15% drop)
         
         Returns:
             Voltage reading in V
         """
         if self.fault_state == FaultType.SUPPLY_FAULT:
-            # Voltage drop: 190-207V range
-            return random.uniform(190, 207)
+            # Voltage drop: 340-370V range (15% drop from 400V)
+            return random.uniform(340, 370)
         elif self.fault_state == FaultType.OVERLOAD:
             # Slight voltage sag under heavy load
             return self.nominal_voltage * random.uniform(0.95, 0.98)
         else:
-            # Normal: ±2% variation
+            # Normal: ±2% variation around 400V
             return self.nominal_voltage * random.uniform(0.98, 1.02)
     
     def _generate_vibration(self) -> float:

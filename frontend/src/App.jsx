@@ -11,6 +11,8 @@ import {
   ReferenceArea, AreaChart, Area, ComposedChart
 } from 'recharts'
 import PumpViewer3D from './components/PumpViewer3D'
+import FaultScenariosPanel from './components/FaultScenariosPanel'
+import FaultTreeDiagram from './components/FaultTreeDiagram'
 
 // API Base URL
 const API_BASE = ''  // Empty for Vite proxy
@@ -114,37 +116,92 @@ function MetricCard({ title, value, unit, icon: Icon, status = 'normal', subValu
 }
 
 // =====================================================
-// Fault Button Component
-// =====================================================
-function FaultButton({ id, name, icon, active, onClick, disabled }) {
-  const isNormal = id === 'NORMAL'
-  
-  return (
-    <button
-      onClick={() => onClick(id)}
-      disabled={disabled}
-      className={`
-        flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm
-        transition-all duration-200 
-        ${active 
-          ? (isNormal 
-              ? 'bg-green-500/20 border border-green-500/50 text-green-400 shadow-glow-success' 
-              : 'bg-red-500/20 border border-red-500/50 text-red-400 shadow-glow-danger')
-          : 'glass-light hover:bg-slate-700/50 text-slate-300 hover:text-white'
-        }
-        disabled:opacity-50 disabled:cursor-not-allowed
-      `}
-    >
-      <span>{icon}</span>
-      <span>{name}</span>
-    </button>
-  )
-}
-
-// =====================================================
 // Diagnosis Panel Component with Shutdown Decision
 // =====================================================
 function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onEmergencyStop }) {
+  // Parse diagnosis text into structured sections
+  const parseDiagnosis = (text) => {
+    if (!text) return null;
+    
+    const sections = {
+      diagnosis: '',
+      rootCause: '',
+      actionItems: [],
+      references: []
+    };
+    
+    // Split by common headers
+    const lines = text.split('\n');
+    let currentSection = 'other';
+    let currentContent = [];
+    
+    lines.forEach(line => {
+      const lowerLine = line.toLowerCase();
+      
+      // Detect section headers
+      if (lowerLine.includes('diagnosis:') || lowerLine.includes('**diagnosis:**') || lowerLine.includes('diagnostic:')) {
+        if (currentContent.length > 0) {
+          sections[currentSection] = currentContent.join('\n');
+          currentContent = [];
+        }
+        currentSection = 'diagnosis';
+        const content = line.replace(/\*?\*?diagnosis:?\*?\*?/i, '').trim();
+        if (content) currentContent.push(content);
+      }
+      else if (lowerLine.includes('root cause:') || lowerLine.includes('**root cause:**') || lowerLine.includes('cause:')) {
+        if (currentContent.length > 0) {
+          sections[currentSection] = currentContent.join('\n');
+          currentContent = [];
+        }
+        currentSection = 'rootCause';
+        const content = line.replace(/\*?\*?root cause:?\*?\*?/i, '').replace(/\*?\*?cause:?\*?\*?/i, '').trim();
+        if (content) currentContent.push(content);
+      }
+      else if (lowerLine.includes('action items:') || lowerLine.includes('**action items:**') || lowerLine.includes('actions:') || lowerLine.includes('recommendations:')) {
+        if (currentContent.length > 0) {
+          sections[currentSection] = currentContent.join('\n');
+          currentContent = [];
+        }
+        currentSection = 'actionItems';
+      }
+      else if (line.trim().match(/^\d+\.\s+\*?\*?/) || line.trim().match(/^[\-\•]\s+/)) {
+        // Numbered or bulleted item
+        if (currentSection === 'actionItems') {
+          const cleanedLine = line.replace(/^\d+\.\s+/, '').replace(/^[\-\•]\s+/, '').replace(/\*\*/g, '').trim();
+          if (cleanedLine) sections.actionItems.push(cleanedLine);
+        } else {
+          currentContent.push(line);
+        }
+      }
+      else {
+        currentContent.push(line);
+      }
+    });
+    
+    // Save remaining content
+    if (currentContent.length > 0) {
+      if (currentSection === 'actionItems') {
+        currentContent.forEach(line => {
+          const cleaned = line.replace(/\*\*/g, '').trim();
+          if (cleaned && !cleaned.match(/^action items/i)) {
+            sections.actionItems.push(cleaned);
+          }
+        });
+      } else {
+        sections[currentSection] = currentContent.join('\n');
+      }
+    }
+    
+    // Extract manual references
+    const refMatches = text.match(/\[Manual Ref[erence]*\s*[\d,\s]+.*?\]/gi) || [];
+    const pageMatches = text.match(/\(Manual Reference \d+.*?\)/gi) || [];
+    sections.references = [...refMatches, ...pageMatches].map(r => r.replace(/[\[\]\(\)]/g, ''));
+    
+    return sections;
+  };
+
+  const parsed = parseDiagnosis(diagnosis);
+  
   // Determine shutdown banner style
   const getShutdownStyle = () => {
     if (!shutdownDecision) return null
@@ -200,8 +257,8 @@ function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onE
             <div className="flex-1">
               <h4 className={`font-bold ${style.text} mb-1`}>
                 {shutdownDecision.action === 'IMMEDIATE_SHUTDOWN' 
-                  ? '🚨 ARRÊT IMMÉDIAT REQUIS' 
-                  : '⚠️ ATTENTION REQUISE'}
+                  ? '🚨 IMMEDIATE SHUTDOWN REQUIRED' 
+                  : '⚠️ ATTENTION REQUIRED'}
               </h4>
               <p className={`text-sm ${style.text} mb-2`}>
                 {shutdownDecision.message}
@@ -210,11 +267,11 @@ function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onE
               {/* Critical Conditions */}
               {shutdownDecision.critical_conditions?.length > 0 && (
                 <div className="mb-2">
-                  <p className="text-xs text-red-300 font-semibold mb-1">Conditions critiques:</p>
+                  <p className="text-xs text-red-300 font-semibold mb-1">Critical conditions:</p>
                   {shutdownDecision.critical_conditions.map((cond, i) => (
                     <div key={i} className="text-xs text-red-200 ml-2">
                       • {cond.parameter}: <span className="font-mono font-bold">{cond.value}</span> 
-                      <span className="text-red-400"> (seuil: {cond.threshold})</span>
+                      <span className="text-red-400"> (threshold: {cond.threshold})</span>
                     </div>
                   ))}
                 </div>
@@ -223,11 +280,11 @@ function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onE
               {/* Warning Conditions */}
               {shutdownDecision.warning_conditions?.length > 0 && (
                 <div className="mb-2">
-                  <p className="text-xs text-amber-300 font-semibold mb-1">Avertissements:</p>
+                  <p className="text-xs text-amber-300 font-semibold mb-1">Warnings:</p>
                   {shutdownDecision.warning_conditions.map((cond, i) => (
                     <div key={i} className="text-xs text-amber-200 ml-2">
                       • {cond.parameter}: <span className="font-mono font-bold">{cond.value}</span>
-                      <span className="text-amber-400"> (seuil: {cond.threshold})</span>
+                      <span className="text-amber-400"> (threshold: {cond.threshold})</span>
                     </div>
                   ))}
                 </div>
@@ -236,7 +293,7 @@ function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onE
               {/* Recommendation */}
               <div className={`mt-2 pt-2 border-t ${shutdownDecision.action === 'IMMEDIATE_SHUTDOWN' ? 'border-red-500/30' : 'border-amber-500/30'}`}>
                 <p className="text-xs text-slate-300">
-                  <span className="font-semibold">📋 Recommandation:</span> {shutdownDecision.recommendation}
+                  <span className="font-semibold">📋 Recommendation:</span> {shutdownDecision.recommendation}
                 </p>
               </div>
               
@@ -251,8 +308,8 @@ function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onE
                   `}
                 >
                   🛑 {shutdownDecision.action === 'IMMEDIATE_SHUTDOWN' 
-                    ? 'ARRÊT D\'URGENCE IMMÉDIAT' 
-                    : 'ARRÊTER APRÈS DIAGNOSTIC'}
+                    ? 'EMERGENCY STOP NOW' 
+                    : 'STOP AFTER DIAGNOSTIC'}
                 </button>
               )}
             </div>
@@ -266,24 +323,96 @@ function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onE
           <div className="flex items-center gap-2">
             <span className="text-lg">✅</span>
             <span className="text-green-400 text-sm font-medium">
-              Fonctionnement normal - Aucune action requise
+              Normal operation - No action required
             </span>
           </div>
         </div>
       )}
       
-      <div className="bg-slate-800/50 rounded-lg p-4 max-h-64 overflow-y-auto">
+      {/* Diagnosis Content */}
+      <div className="space-y-4 max-h-[500px] overflow-y-auto">
         {isLoading ? (
-          <div className="flex items-center gap-3 text-slate-400">
+          <div className="flex items-center gap-3 text-slate-400 p-4">
             <RefreshCw className="w-5 h-5 animate-spin" />
             <span>Analyzing sensor data...</span>
           </div>
+        ) : parsed ? (
+          <div className="space-y-4 slide-in">
+            {/* Diagnosis Section */}
+            {parsed.diagnosis && (
+              <div className="bg-slate-800/70 rounded-lg p-4 border-l-4 border-cyan-500">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-lg">🔍</span>
+                  <h4 className="font-semibold text-cyan-400">Diagnosis</h4>
+                </div>
+                <p className="text-slate-300 text-sm leading-relaxed">
+                  {parsed.diagnosis.replace(/\*\*/g, '').trim()}
+                </p>
+              </div>
+            )}
+            
+            {/* Root Cause Section */}
+            {parsed.rootCause && (
+              <div className="bg-slate-800/70 rounded-lg p-4 border-l-4 border-orange-500">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-lg">⚡</span>
+                  <h4 className="font-semibold text-orange-400">Root Cause</h4>
+                </div>
+                <p className="text-slate-300 text-sm leading-relaxed">
+                  {parsed.rootCause.replace(/\*\*/g, '').trim()}
+                </p>
+              </div>
+            )}
+            
+            {/* Action Items Section */}
+            {parsed.actionItems && parsed.actionItems.length > 0 && (
+              <div className="bg-slate-800/70 rounded-lg p-4 border-l-4 border-green-500">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="text-lg">✅</span>
+                  <h4 className="font-semibold text-green-400">Action Items</h4>
+                </div>
+                <div className="space-y-2">
+                  {parsed.actionItems.map((item, index) => (
+                    <div key={index} className="flex items-start gap-3 bg-slate-900/50 rounded-lg p-3">
+                      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-green-500/20 text-green-400 
+                                     flex items-center justify-center text-xs font-bold">
+                        {index + 1}
+                      </span>
+                      <p className="text-slate-300 text-sm leading-relaxed flex-1">
+                        {item.replace(/^\*\*.*?\*\*:?\s*/, '').replace(/\*\*/g, '')}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            
+            {/* Manual References */}
+            {parsed.references && parsed.references.length > 0 && (
+              <div className="bg-slate-800/70 rounded-lg p-3 border border-slate-600">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-lg">📖</span>
+                  <h4 className="font-semibold text-slate-400 text-sm">Manual References</h4>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {parsed.references.map((ref, index) => (
+                    <span key={index} className="text-xs bg-blue-500/20 text-blue-300 px-2 py-1 rounded">
+                      {ref}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         ) : diagnosis ? (
-          <div className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap slide-in">
-            {diagnosis}
+          // Fallback: show raw text if parsing failed
+          <div className="bg-slate-800/50 rounded-lg p-4">
+            <div className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">
+              {diagnosis}
+            </div>
           </div>
         ) : (
-          <div className="text-slate-500 text-sm italic">
+          <div className="text-slate-500 text-sm italic p-4 text-center">
             Inject a fault to see AI diagnosis, or click refresh to analyze current state.
           </div>
         )}
@@ -846,10 +975,10 @@ function App() {
             return newHistory.slice(-60)  // Keep last 60 readings
           })
           
-          // Update active fault from sensor data
-          if (message.data.fault_state) {
-            const faultKey = message.data.fault_state.toUpperCase().replace(' ', '_')
-            setActiveFault(faultKey === 'NORMAL' ? 'NORMAL' : faultKey)
+          // Update active fault from SCENARIO STATE (not sensor fault_state)
+          // This ensures frontend is synced with backend state manager
+          if (message.scenario_state) {
+            setActiveFault(message.scenario_state.id)
           }
         }
       }
@@ -876,29 +1005,30 @@ function App() {
   }, [])
 
   // 🛑 AUTO-MONITORING: Check for critical conditions on every sensor update
+  // Note: Auto-diagnosis disabled when AI Agent is not available
   useEffect(() => {
     if (!sensorData || activeFault === 'NORMAL') return
     if (emergencyStopInProgressRef.current) return
     
     const temp = sensorData.temperature || 0
     const vibration = sensorData.vibration || 0
-    const voltage = sensorData.voltage || 230
+    const voltage = sensorData.voltage || 400  // 400V 3-phase system
     const imbalance = sensorData.amperage?.imbalance_pct || 0
     const pressure = sensorData.pressure || 4
     
-    // Critical thresholds - same as backend
+    // Critical thresholds - for 400V 3-phase system
     const isCritical = (
       temp > 90 ||           // Temperature > 90°C
       vibration > 10 ||      // Vibration > 10 mm/s
       imbalance > 15 ||      // Phase imbalance > 15%
-      voltage < 180 ||       // Severe undervoltage
-      voltage > 270 ||       // Severe overvoltage
+      voltage < 340 ||       // Severe undervoltage (<15% of 400V)
+      voltage > 460 ||       // Severe overvoltage (>15% of 400V)
       pressure <= 0          // Dry running
     )
     
     if (isCritical) {
-      // Auto-trigger diagnosis which will handle the emergency stop
-      handleRefreshDiagnosis()
+      // Only log critical condition - manual diagnosis available via button
+      console.warn('⚠️ Critical condition detected:', { temp, vibration, imbalance, voltage, pressure })
     }
   }, [sensorData, activeFault])
 
@@ -915,12 +1045,20 @@ function App() {
         setActiveFault(faultId)
         emergencyStopInProgressRef.current = false
         
-        // Auto-trigger diagnosis for non-normal faults
-        if (faultId !== 'NORMAL') {
-          setTimeout(() => handleRefreshDiagnosis(), 2000)  // Wait for sensor data to update
-        } else {
+        // Clear diagnosis when fault changes
+        if (faultId === 'NORMAL') {
           setDiagnosis('')
           setShutdownDecision(null)
+        } else {
+          // Set loading state immediately to show user we're working
+          setDiagnosis('🔄 Analyse en cours après injection du défaut...')
+          setDiagnosisLoading(true)
+          
+          // Wait for 2 WebSocket updates (2 seconds) to ensure new sensor data
+          // Then trigger diagnosis with fresh data
+          setTimeout(async () => {
+            await handleRefreshDiagnosis()
+          }, 2500)
         }
       }
     } catch (error) {
@@ -970,12 +1108,28 @@ function App() {
         if (data.shutdown_decision?.action === 'IMMEDIATE_SHUTDOWN') {
           await handleEmergencyStop(data.shutdown_decision.message)
         }
+      } else if (response.status === 503) {
+        // AI Agent not available
+        setDiagnosis('⚠️ AI Diagnosis unavailable - GOOGLE_API_KEY not configured.\nSensor data is still being monitored.')
+      } else if (response.status === 429) {
+        // API quota exceeded
+        setDiagnosis('⚠️ **Quota API Gemini épuisé** (erreur 429)\n\nLe quota gratuit de l\'API Google Gemini est temporairement épuisé.\n\n**Solutions:**\n1. Attendez quelques minutes avant de réessayer\n2. Utilisez une autre clé API dans le fichier `.env`\n3. Les données capteurs continuent d\'être surveillées normalement')
       } else {
         const error = await response.json()
-        setDiagnosis(`Error: ${error.detail}`)
+        // Check for quota error in response body
+        if (error.detail && error.detail.includes('429')) {
+          setDiagnosis('⚠️ **Quota API Gemini épuisé**\n\nVeuillez patienter quelques minutes ou vérifier votre clé API.')
+        } else {
+          setDiagnosis(`Error: ${error.detail}`)
+        }
       }
     } catch (error) {
-      setDiagnosis(`Connection error: ${error.message}`)
+      // Check for quota error in exception message
+      if (error.message && error.message.includes('429')) {
+        setDiagnosis('⚠️ **Quota API épuisé** - Veuillez patienter quelques minutes.')
+      } else {
+        setDiagnosis(`Connection error: ${error.message}`)
+      }
     } finally {
       setDiagnosisLoading(false)
     }
@@ -1168,35 +1322,22 @@ function App() {
           {/* Multi-Sensor Trend Charts */}
           <MultiSensorChart data={sensorHistory} />
 
-          {/* Fault Controls */}
-          <div className="glass rounded-xl p-4">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-amber-400" />
-                <h3 className="font-semibold text-white">🧪 Fault Injection Controls (Development Mode)</h3>
-              </div>
-              {activeFault !== 'NORMAL' && (
-                <div className="flex items-center gap-2 px-3 py-1 rounded-lg bg-red-500/20 border border-red-500/50">
-                  <span className="text-red-400 text-sm">🚨 Active: {activeFault.replace('_', ' ')}</span>
-                  <span className="text-red-300 text-xs">| Duration: {sensorData?.fault_duration?.toFixed(0) || 0}s</span>
-                </div>
-              )}
-            </div>
-            
-            <div className="grid grid-cols-6 gap-3">
-              {faultTypes.map(ft => (
-                <FaultButton
-                  key={ft.id}
-                  id={ft.id}
-                  name={ft.name}
-                  icon={ft.icon}
-                  active={activeFault === ft.id}
-                  onClick={handleInjectFault}
-                  disabled={!connected}
-                />
-              ))}
-            </div>
-          </div>
+          {/* NEW: User-Friendly Fault Scenarios Panel */}
+          <FaultScenariosPanel
+            onInjectFault={(faultId) => {
+              setActiveFault(faultId)
+              emergencyStopInProgressRef.current = false
+              if (faultId === 'NORMAL') {
+                setDiagnosis('')
+                setShutdownDecision(null)
+              } else {
+                // Auto-trigger diagnosis for non-normal faults
+                setTimeout(() => handleRefreshDiagnosis(), 2000)
+              }
+            }}
+            activeFault={activeFault}
+            connected={connected}
+          />
 
           {/* AI Diagnosis */}
           <DiagnosisPanel
@@ -1205,6 +1346,14 @@ function App() {
             isLoading={diagnosisLoading}
             onRefresh={handleRefreshDiagnosis}
             onEmergencyStop={handleEmergencyStop}
+          />
+
+          {/* Fault Progression Decision Tree - UML Style */}
+          <FaultTreeDiagram 
+            currentScenario={activeFault}
+            onPreventionClick={(action) => {
+              console.log('Prevention action clicked:', action);
+            }}
           />
         </div>
       </div>

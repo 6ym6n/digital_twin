@@ -1,0 +1,49 @@
+{
+  "data_source": "python",
+  "tcp": {
+    "host": "0.0.0.0",
+    "port": 5555,
+    "buffer_size": 4096,
+    "timeout": 30.0,
+    "reconnect_delay": 5.0
+  },
+  "pump": {
+    "model": "Grundfos CR 15",
+    "pump_type": "Vertical Multistage Centrifugal",
+    "nominal_flow_rate": 15.0,
+    "min_flow_rate": 2.0,
+    "max_flow_rate": 25.0,
+    "nominal_pressure": 5.0,
+    "motor_power": 5.5,
+    "motor_voltage": 400,
+    "motor_current": 10.5,
+    "nominal_speed": 2900,
+    "motor_efficiency": 0.88,
+    "power_factor": 0.85,
+    "nominal_operating_temp": 65.0
+  },
+  "thresholds": {
+    "current_imbalance_warning": 5.0,
+    "current_imbalance_critical": 15.0,
+    "voltage_low_warning": 207.0,
+    "voltage_low_critical": 180.0,
+    "voltage_high_warning": 253.0,
+    "voltage_high_critical": 270.0,
+    "temperature_warning": 80.0,
+    "temperature_critical": 90.0,
+    "vibration_warning": 5.0,
+    "vibration_critical": 10.0,
+    "pressure_low_warning": 2.0,
+    "pressure_critical": 0.0
+  },
+  "api": {
+    "host": "0.0.0.0",
+    "port": 8000,
+    "websocket_interval": 1.0,
+    "max_history": 60
+  },
+  "paths": {
+    "stl_model": "3DMODEL/pump.stl",
+    "knowledge_base": "data/"
+  }
+}

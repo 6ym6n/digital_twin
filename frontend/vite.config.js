@@ -11,10 +11,21 @@ export default defineConfig({
         changeOrigin: true,
       },
       '/ws': {
-        target: 'http://localhost:8000',
+        target: 'ws://localhost:8000',
         changeOrigin: true,
         ws: true,
         rewriteWsOrigin: true,
+        // Gestion des erreurs pour éviter les crashes
+        configure: (proxy, _options) => {
+          proxy.on('error', (err, _req, _res) => {
+            console.log('[Proxy] WebSocket error - reconnecting...');
+          });
+          proxy.on('proxyReqWs', (proxyReq, req, socket) => {
+            socket.on('error', (err) => {
+              console.log('[Proxy] Socket error - will retry');
+            });
+          });
+        },
       },
     },
   },
