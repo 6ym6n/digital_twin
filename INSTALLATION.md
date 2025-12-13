@@ -163,7 +163,7 @@ In a terminal from the project root:
 
 ```powershell
 cd C:\path\to\digital_twin
-.\venv\Scripts\Activate.ps1
+\venv\Scripts\Activate.ps1
 python tools\mqtt_fake_matlab.py
 ```
 
@@ -173,7 +173,7 @@ In another terminal:
 
 ```powershell
 cd C:\path\to\digital_twin
-.\venv\Scripts\Activate.ps1
+\venv\Scripts\Activate.ps1
 
 $env:SENSOR_SOURCE='mqtt'
 $env:MQTT_HOST='localhost'
