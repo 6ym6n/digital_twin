@@ -48,6 +48,14 @@ mqttBlk = [modelName '/MQTT Pump Twin'];
 add_block('simulink/User-Defined Functions/MATLAB System', mqttBlk, 'Position',[610 140 820 290]);
 set_param(mqttBlk, 'System', 'MQTTPumpTwin');
 
+% MQTT I/O is not code-generation compatible. Run this block in interpreted mode.
+try
+    set_param(mqttBlk, 'SimulateUsing', 'Interpreted execution');
+catch
+    % If your MATLAB release uses a different parameter name, set manually:
+    % Block Parameters -> "Simulate using" -> "Interpreted execution".
+end
+
 % Build signals: voltage, vibration, pressure, temperature, amps_A, amps_B, amps_C
 signals = {
     struct('name','voltage',    'bias',230.0,'amp',  5.0,'tau', 1.5),

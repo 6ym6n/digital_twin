@@ -40,6 +40,16 @@ open_system('mqtt_pump_twin');
 
 Then press **Run**. The model publishes telemetry and reacts to commands using the same topics as the backend.
 
+### If Simulink shows a code generation / compile error
+
+If you see an error like:
+"Try and catch are not supported for code generation" (or any codegen-related error), set the MATLAB System block to interpreted execution:
+
+- Open the block: `mqtt_pump_twin_tf/MQTT Pump Twin`
+- In Block Parameters, set **Simulate using** → **Interpreted execution**
+
+(The provided model builder scripts try to set this automatically.)
+
 ### Simple transfer-function plant (recommended)
 
 If you want a minimal "plant" (first-order transfer functions) feeding the MQTT publisher, use:

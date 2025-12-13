@@ -16,12 +16,18 @@ classdef MQTTPumpTwin < matlab.System
     %   {"command":"RESET"}
     %   {"command":"EMERGENCY_STOP"}
 
-    properties
+    properties(Nontunable)
+        % Simulink does not allow char/string parameters to be tunable.
         Host (1,:) char = 'localhost'
-        Port (1,1) double = 1883
         PumpId (1,:) char = 'pump01'
         BaseTopic (1,:) char = 'digital_twin'
+    end
 
+    properties(Nontunable)
+        Port (1,1) double = 1883
+    end
+
+    properties
         RateHz (1,1) double = 1
 
         NominalVoltage (1,1) double = 230.0
@@ -29,6 +35,24 @@ classdef MQTTPumpTwin < matlab.System
         NominalVibration (1,1) double = 1.5
         NominalPressure (1,1) double = 5.0
         NominalTemperature (1,1) double = 65.0
+
+        % Safety/realism: cap temperature so faults don't grow unbounded
+        MaxTemperature (1,1) double = 120.0
+
+        % Realism: first-order dynamics toward targets + small noise
+        DynamicsAlpha (1,1) double = 0.35
+        NoiseScale (1,1) double = 1.0
+
+        % Value bounds
+        MinVoltage (1,1) double = 0.0
+        MaxVoltage (1,1) double = 260.0
+        MinCurrent (1,1) double = 0.0
+        MaxCurrent (1,1) double = 20.0
+        MinVibration (1,1) double = 0.0
+        MaxVibration (1,1) double = 12.0
+        MinPressure (1,1) double = 0.0
+        MaxPressure (1,1) double = 12.0
+        MinTemperature (1,1) double = -20.0
     end
 
     properties(Access=private)
@@ -43,6 +67,20 @@ classdef MQTTPumpTwin < matlab.System
         LastPublishEpoch (1,1) double = 0
         PendingMessages cell = {}
         UseCallback (1,1) logical = false
+
+        % Internal signal states (for smooth convergence + oscillation)
+        LastVoltage (1,1) double = NaN
+        LastVibration (1,1) double = NaN
+        LastPressure (1,1) double = NaN
+        LastTemperature (1,1) double = NaN
+        LastA (1,1) double = NaN
+        LastB (1,1) double = NaN
+        LastC (1,1) double = NaN
+
+        TemperatureSetpoint (1,1) double = NaN
+        TemperatureBand (1,1) double = 2.0
+
+        IsStopped (1,1) logical = false
     end
 
     methods(Access=protected)
@@ -51,7 +89,8 @@ classdef MQTTPumpTwin < matlab.System
             obj.CommandTopic   = sprintf('%s/%s/command',   obj.BaseTopic, obj.PumpId);
 
             obj.Client = MQTTPumpTwin.createClient(obj.Host, obj.Port);
-            subscribe(obj.Client, obj.CommandTopic);
+            % Use method-call syntax to avoid function name clashes (e.g. MATLAB codetools publish).
+            obj.Client.subscribe(obj.CommandTopic);
 
             % Prefer callback if available; fall back to polling.
             obj.UseCallback = false;
@@ -65,6 +104,15 @@ classdef MQTTPumpTwin < matlab.System
             end
 
             obj.LastPublishEpoch = MQTTPumpTwin.epochSeconds();
+
+            % Initialize internal states near nominal
+            obj.LastVoltage = obj.NominalVoltage;
+            obj.LastVibration = obj.NominalVibration;
+            obj.LastPressure = obj.NominalPressure;
+            obj.LastTemperature = obj.NominalTemperature;
+            obj.LastA = obj.NominalCurrent;
+            obj.LastB = obj.NominalCurrent;
+            obj.LastC = obj.NominalCurrent;
         end
 
         function stepImpl(obj, voltageIn, vibrationIn, pressureIn, temperatureIn, ampsAIn, ampsBIn, ampsCIn)
@@ -85,43 +133,131 @@ classdef MQTTPumpTwin < matlab.System
             obj.Seq = obj.Seq + 1;
             dur = obj.faultDurationSeconds(nowEpoch);
 
+            % Emergency stop: publish exact zeros (no noise / no oscillation)
+            if obj.IsStopped
+                obj.LastVoltage = 0;
+                obj.LastVibration = 0;
+                obj.LastPressure = 0;
+                obj.LastTemperature = 0;
+                obj.LastA = 0;
+                obj.LastB = 0;
+                obj.LastC = 0;
+
+                telemetry = struct();
+                telemetry.pump_id = obj.PumpId;
+                telemetry.timestamp = MQTTPumpTwin.utcNowIso();
+                telemetry.seq = double(obj.Seq);
+                telemetry.fault_state = 'NORMAL';
+                telemetry.fault_duration_s = 0;
+                telemetry.amps_A = 0;
+                telemetry.amps_B = 0;
+                telemetry.amps_C = 0;
+                telemetry.imbalance_pct = 0;
+                telemetry.voltage = 0;
+                telemetry.vibration = 0;
+                telemetry.pressure = 0;
+                telemetry.temperature = 0;
+
+                payload = jsonencode(telemetry);
+                try
+                    obj.Client.publish(obj.TelemetryTopic, payload);
+                catch
+                end
+                return;
+            end
+
             % Base signals come from Simulink inputs (transfer functions / plant model).
             % If inputs are unconnected/invalid, fall back to nominal values.
-            voltage     = obj.sanitize(voltageIn, obj.NominalVoltage);
-            vibration   = obj.sanitize(vibrationIn, obj.NominalVibration);
-            pressure    = obj.sanitize(pressureIn, obj.NominalPressure);
-            temperature = obj.sanitize(temperatureIn, obj.NominalTemperature);
+            voltageT     = obj.sanitize(voltageIn, obj.NominalVoltage);
+            vibrationT   = obj.sanitize(vibrationIn, obj.NominalVibration);
+            pressureT    = obj.sanitize(pressureIn, obj.NominalPressure);
+            temperatureT = obj.sanitize(temperatureIn, obj.NominalTemperature);
 
-            a = obj.sanitize(ampsAIn, obj.NominalCurrent);
-            b = obj.sanitize(ampsBIn, obj.NominalCurrent);
-            c = obj.sanitize(ampsCIn, obj.NominalCurrent);
+            aT = obj.sanitize(ampsAIn, obj.NominalCurrent);
+            bT = obj.sanitize(ampsBIn, obj.NominalCurrent);
+            cT = obj.sanitize(ampsCIn, obj.NominalCurrent);
 
             % Fault behavior (mirrors existing Python simulator)
             switch upper(string(obj.FaultState))
                 case 'WINDING_DEFECT'
-                    c = c * (1.0 + min(0.05 + double(dur) * 0.01, 0.25));
-                    temperature = obj.NominalTemperature + 15 + double(dur) * 2;
+                    cT = cT * (1.0 + min(0.05 + double(dur) * 0.01, 0.25));
+                    temperatureT = obj.NominalTemperature + 15 + double(dur) * 2;
                 case 'SUPPLY_FAULT'
-                    voltage = MQTTPumpTwin.randUniform(190, 207);
+                    voltageT = MQTTPumpTwin.randUniform(190, 207);
                 case 'CAVITATION'
-                    vibration = 5.0 + MQTTPumpTwin.randUniform(0, 3.0);
+                    vibrationT = 5.0 + MQTTPumpTwin.randUniform(0, 3.0);
                     if rand() < 0.3
-                        vibration = vibration + MQTTPumpTwin.randUniform(2, 5);
+                        vibrationT = vibrationT + MQTTPumpTwin.randUniform(2, 5);
                     end
-                    pressure = max(0.0, obj.NominalPressure + MQTTPumpTwin.randUniform(-1.5, 0.5));
+                    pressureT = max(0.0, obj.NominalPressure + MQTTPumpTwin.randUniform(-1.5, 0.5));
                 case 'BEARING_WEAR'
-                    vibration = obj.NominalVibration + 1.5 + double(dur) * 0.1 + MQTTPumpTwin.randUniform(-0.3, 0.5);
-                    temperature = obj.NominalTemperature + 5 + MQTTPumpTwin.randUniform(0, 3);
+                    vibrationT = obj.NominalVibration + 1.5 + double(dur) * 0.1 + MQTTPumpTwin.randUniform(-0.3, 0.5);
+                    temperatureT = obj.NominalTemperature + 5 + MQTTPumpTwin.randUniform(0, 3);
                 case 'OVERLOAD'
-                    a = a * MQTTPumpTwin.randUniform(1.15, 1.30);
-                    b = b * MQTTPumpTwin.randUniform(1.15, 1.30);
-                    c = c * MQTTPumpTwin.randUniform(1.15, 1.30);
-                    voltage = obj.NominalVoltage * MQTTPumpTwin.randUniform(0.95, 0.98);
-                    pressure = obj.NominalPressure * MQTTPumpTwin.randUniform(1.1, 1.3);
-                    temperature = obj.NominalTemperature + 10 + MQTTPumpTwin.randUniform(0, 5);
+                    aT = aT * MQTTPumpTwin.randUniform(1.15, 1.30);
+                    bT = bT * MQTTPumpTwin.randUniform(1.15, 1.30);
+                    cT = cT * MQTTPumpTwin.randUniform(1.15, 1.30);
+                    voltageT = obj.NominalVoltage * MQTTPumpTwin.randUniform(0.95, 0.98);
+                    pressureT = obj.NominalPressure * MQTTPumpTwin.randUniform(1.1, 1.3);
+                    temperatureT = obj.NominalTemperature + 10 + MQTTPumpTwin.randUniform(0, 5);
                 otherwise
                     % NORMAL
             end
+
+            alpha = min(max(obj.DynamicsAlpha, 0.0), 1.0);
+
+            % Cap targets to bounds
+            tempMin = obj.MinTemperature;
+            tempMax = obj.MaxTemperature;
+            if isfinite(obj.TemperatureSetpoint)
+                band = obj.TemperatureBand;
+                if ~isfinite(band) || band <= 0
+                    band = 2.0;
+                end
+                temperatureT = obj.TemperatureSetpoint;
+                tempMin = max(obj.MinTemperature, temperatureT - band);
+                tempMax = min(obj.MaxTemperature, temperatureT + band);
+            end
+
+            temperatureT = min(max(temperatureT, tempMin), tempMax);
+            voltageT = min(max(voltageT, obj.MinVoltage), obj.MaxVoltage);
+            vibrationT = min(max(vibrationT, obj.MinVibration), obj.MaxVibration);
+            pressureT = min(max(pressureT, obj.MinPressure), obj.MaxPressure);
+            aT = min(max(aT, obj.MinCurrent), obj.MaxCurrent);
+            bT = min(max(bT, obj.MinCurrent), obj.MaxCurrent);
+            cT = min(max(cT, obj.MinCurrent), obj.MaxCurrent);
+
+            % Per-signal noise amplitudes (absolute units)
+            vNoise = max(0.5, obj.NominalVoltage * 0.005) * obj.NoiseScale;
+            pNoise = max(0.02, obj.NominalPressure * 0.01) * obj.NoiseScale;
+            vibNoise = max(0.03, obj.NominalVibration * 0.05) * obj.NoiseScale;
+            if isfinite(obj.TemperatureSetpoint)
+                band = obj.TemperatureBand;
+                if ~isfinite(band) || band <= 0
+                    band = 2.0;
+                end
+                tNoise = max(0.05, band / 3.0) * obj.NoiseScale;
+            else
+                tNoise = max(0.2, 0.5) * obj.NoiseScale;
+            end
+            iNoise = max(0.05, obj.NominalCurrent * 0.01) * obj.NoiseScale;
+
+            % Smooth convergence + oscillation
+            obj.LastVoltage = MQTTPumpTwin.approachToTarget(obj.LastVoltage, voltageT, alpha, vNoise, obj.MinVoltage, obj.MaxVoltage);
+            obj.LastPressure = MQTTPumpTwin.approachToTarget(obj.LastPressure, pressureT, alpha, pNoise, obj.MinPressure, obj.MaxPressure);
+            obj.LastVibration = MQTTPumpTwin.approachToTarget(obj.LastVibration, vibrationT, alpha, vibNoise, obj.MinVibration, obj.MaxVibration);
+            obj.LastTemperature = MQTTPumpTwin.approachToTarget(obj.LastTemperature, temperatureT, alpha, tNoise, tempMin, tempMax);
+            obj.LastA = MQTTPumpTwin.approachToTarget(obj.LastA, aT, alpha, iNoise, obj.MinCurrent, obj.MaxCurrent);
+            obj.LastB = MQTTPumpTwin.approachToTarget(obj.LastB, bT, alpha, iNoise, obj.MinCurrent, obj.MaxCurrent);
+            obj.LastC = MQTTPumpTwin.approachToTarget(obj.LastC, cT, alpha, iNoise, obj.MinCurrent, obj.MaxCurrent);
+
+            voltage = obj.LastVoltage;
+            pressure = obj.LastPressure;
+            vibration = obj.LastVibration;
+            temperature = obj.LastTemperature;
+            a = obj.LastA;
+            b = obj.LastB;
+            c = obj.LastC;
 
             imbalance_pct = MQTTPumpTwin.computeImbalancePct(a, b, c);
 
@@ -141,14 +277,20 @@ classdef MQTTPumpTwin < matlab.System
             telemetry.temperature = temperature;
 
             payload = jsonencode(telemetry);
-            publish(obj.Client, obj.TelemetryTopic, payload);
+            obj.publishMessage(obj.TelemetryTopic, payload);
         end
 
         function releaseImpl(obj)
             try
                 if ~isempty(obj.Client)
                     % best-effort cleanup
-                    clear obj.Client
+                    try
+                        if ismethod(obj.Client, 'disconnect')
+                            obj.Client.disconnect();
+                        end
+                    catch
+                    end
+                    obj.Client = [];
                 end
             catch
             end
@@ -205,6 +347,67 @@ classdef MQTTPumpTwin < matlab.System
     end
 
     methods(Access=private)
+        function publishMessage(obj, topic, payload)
+            % Publish wrapper to handle different MQTT client APIs and avoid
+            % name clashes with MATLAB codetools `publish`.
+            client = obj.Client;
+            if isempty(client)
+                return;
+            end
+
+            % Method-based APIs
+            if ismethod(client, 'publish')
+                client.publish(topic, payload);
+                return;
+            end
+
+            % Some toolboxes use write/send-style methods.
+            if ismethod(client, 'write')
+                try
+                    client.write(topic, payload);
+                    return;
+                catch
+                end
+                try
+                    client.write(payload, 'Topic', topic);
+                    return;
+                catch
+                end
+            end
+
+            if ismethod(client, 'send')
+                try
+                    client.send(topic, payload);
+                    return;
+                catch
+                end
+                try
+                    client.send(payload, 'Topic', topic);
+                    return;
+                catch
+                end
+            end
+
+            % Function-based APIs (try fully-qualified first)
+            try
+                if exist('icomm.mqtt.publish', 'file') == 2
+                    icomm.mqtt.publish(client, topic, payload);
+                    return;
+                end
+            catch
+            end
+
+            % Last resort: call `publish(client,topic,payload)` only if it is
+            % NOT MATLAB's codetools publish (which treats strings as field names).
+            pubPath = which('publish');
+            if ~isempty(pubPath) && contains(lower(pubPath), [filesep 'codetools' filesep])
+                error('MQTTPumpTwin:PublishNotSupported', ...
+                    'MQTT publish API not found for client class %s (and publish() resolves to codetools).', class(client));
+            end
+
+            publish(client, topic, payload);
+        end
+
         function v = sanitize(~, x, defaultValue)
             try
                 if isempty(x)
@@ -237,7 +440,7 @@ classdef MQTTPumpTwin < matlab.System
         function pollCommands(obj)
             % Read up to 10 queued command messages without blocking
             try
-                data = read(obj.Client, 10, 'Topic', obj.CommandTopic, 'Timeout', 0);
+                data = obj.Client.read(10, 'Topic', obj.CommandTopic, 'Timeout', 0);
                 if isempty(data)
                     return;
                 end
@@ -299,17 +502,35 @@ classdef MQTTPumpTwin < matlab.System
             cmd = upper(string(cmdObj.command));
             switch cmd
                 case 'INJECT_FAULT'
+                    obj.IsStopped = false;
                     if isfield(cmdObj, 'fault_type')
                         f = upper(string(cmdObj.fault_type));
                         obj.FaultState = char(f);
                         obj.FaultStartEpoch = MQTTPumpTwin.epochSeconds();
                     end
+
+                    if isfield(cmdObj, 'temperature_target')
+                        try
+                            obj.TemperatureSetpoint = double(cmdObj.temperature_target);
+                        catch
+                        end
+                    end
+                    if isfield(cmdObj, 'temperature_band')
+                        try
+                            obj.TemperatureBand = double(cmdObj.temperature_band);
+                        catch
+                        end
+                    end
                 case 'RESET'
                     obj.FaultState = 'NORMAL';
                     obj.FaultStartEpoch = NaN;
+                    obj.TemperatureSetpoint = NaN;
+                    obj.IsStopped = false;
                 case 'EMERGENCY_STOP'
                     obj.FaultState = 'NORMAL';
                     obj.FaultStartEpoch = NaN;
+                    obj.TemperatureSetpoint = NaN;
+                    obj.IsStopped = true;
             end
         end
 
@@ -355,6 +576,17 @@ classdef MQTTPumpTwin < matlab.System
 
         function t = epochSeconds()
             t = posixtime(datetime('now', 'TimeZone', 'UTC'));
+        end
+
+        function y = approachToTarget(x, target, alpha, noiseStd, minVal, maxVal)
+            if isempty(x) || ~isfinite(x)
+                x = target;
+            end
+            if ~isfinite(target)
+                target = x;
+            end
+            y = x + alpha * (target - x) + noiseStd * randn();
+            y = min(max(y, minVal), maxVal);
         end
     end
 end

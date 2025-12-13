@@ -144,7 +144,7 @@ function FaultButton({ id, name, icon, active, onClick, disabled }) {
 // =====================================================
 // Diagnosis Panel Component with Shutdown Decision
 // =====================================================
-function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onEmergencyStop }) {
+function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onEmergencyStop, activeFault }) {
   // Determine shutdown banner style
   const getShutdownStyle = () => {
     if (!shutdownDecision) return null
@@ -186,11 +186,26 @@ function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onE
         <button
           onClick={onRefresh}
           disabled={isLoading}
-          className="p-2 rounded-lg hover:bg-slate-700/50 transition-colors disabled:opacity-50"
+          className="flex items-center gap-2 px-3 py-2 rounded-lg glass-light hover:bg-slate-700/50 transition-colors disabled:opacity-50"
         >
-          <RefreshCw className={`w-4 h-4 text-slate-400 ${isLoading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-4 h-4 text-slate-300 ${isLoading ? 'animate-spin' : ''}`} />
+          <span className="text-slate-200 text-sm font-medium">Diagnose</span>
         </button>
       </div>
+
+      {/* Fault prompt (manual diagnosis) */}
+      {activeFault && activeFault !== 'NORMAL' && !diagnosis && !isLoading && (
+        <div className="mb-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-400" />
+              <span className="text-amber-200 text-sm">
+                Défaut détecté: <span className="font-semibold">{activeFault.replace('_', ' ')}</span>. Cliquez sur <span className="font-semibold">Diagnose</span>.
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
       
       {/* Shutdown Decision Banner */}
       {shutdownDecision && shutdownDecision.action !== 'NORMAL_OPERATION' && (
@@ -284,7 +299,9 @@ function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onE
           </div>
         ) : (
           <div className="text-slate-500 text-sm italic">
-            Inject a fault to see AI diagnosis, or click refresh to analyze current state.
+            {activeFault && activeFault !== 'NORMAL'
+              ? 'Défaut détecté. Cliquez sur Diagnose pour lancer le diagnostic.'
+              : 'Inject a fault to see AI diagnosis, then click Diagnose to analyze current state.'}
           </div>
         )}
       </div>
@@ -875,32 +892,7 @@ function App() {
     }
   }, [])
 
-  // 🛑 AUTO-MONITORING: Check for critical conditions on every sensor update
-  useEffect(() => {
-    if (!sensorData || activeFault === 'NORMAL') return
-    if (emergencyStopInProgressRef.current) return
-    
-    const temp = sensorData.temperature || 0
-    const vibration = sensorData.vibration || 0
-    const voltage = sensorData.voltage || 230
-    const imbalance = sensorData.amperage?.imbalance_pct || 0
-    const pressure = sensorData.pressure || 4
-    
-    // Critical thresholds - same as backend
-    const isCritical = (
-      temp > 90 ||           // Temperature > 90°C
-      vibration > 10 ||      // Vibration > 10 mm/s
-      imbalance > 15 ||      // Phase imbalance > 15%
-      voltage < 180 ||       // Severe undervoltage
-      voltage > 270 ||       // Severe overvoltage
-      pressure <= 0          // Dry running
-    )
-    
-    if (isCritical) {
-      // Auto-trigger diagnosis which will handle the emergency stop
-      handleRefreshDiagnosis()
-    }
-  }, [sensorData, activeFault])
+  // Diagnosis is manual: only run when the user clicks the Diagnose button.
 
   // Inject fault
   const handleInjectFault = async (faultId) => {
@@ -914,11 +906,9 @@ function App() {
       if (response.ok) {
         setActiveFault(faultId)
         emergencyStopInProgressRef.current = false
-        
-        // Auto-trigger diagnosis for non-normal faults
-        if (faultId !== 'NORMAL') {
-          setTimeout(() => handleRefreshDiagnosis(), 2000)  // Wait for sensor data to update
-        } else {
+
+        // Keep diagnosis manual; clear diagnosis when returning to normal.
+        if (faultId === 'NORMAL') {
           setDiagnosis('')
           setShutdownDecision(null)
         }
@@ -941,6 +931,28 @@ function App() {
       
       if (response.ok) {
         setActiveFault('NORMAL')
+
+        // Immediately reflect a stopped pump: zero-out sensor values in the UI.
+        const zeroReading = {
+          timestamp: new Date().toISOString(),
+          fault_state: 'NORMAL',
+          fault_duration: 0,
+          amperage: {
+            phase_a: 0,
+            phase_b: 0,
+            phase_c: 0,
+            average: 0,
+            imbalance_pct: 0,
+          },
+          voltage: 0,
+          vibration: 0,
+          pressure: 0,
+          temperature: 0,
+        }
+
+        setSensorData(zeroReading)
+        sensorDataRef.current = zeroReading
+        setSensorHistory([zeroReading])
       }
     } catch (error) {
       console.error('Failed to execute emergency stop:', error)
@@ -965,11 +977,6 @@ function App() {
         const data = await response.json()
         setDiagnosis(data.diagnosis)
         setShutdownDecision(data.shutdown_decision || null)
-        
-        // 🛑 AUTO EMERGENCY STOP if critical conditions detected
-        if (data.shutdown_decision?.action === 'IMMEDIATE_SHUTDOWN') {
-          await handleEmergencyStop(data.shutdown_decision.message)
-        }
       } else {
         const error = await response.json()
         setDiagnosis(`Error: ${error.detail}`)
@@ -1205,6 +1212,7 @@ function App() {
             isLoading={diagnosisLoading}
             onRefresh={handleRefreshDiagnosis}
             onEmergencyStop={handleEmergencyStop}
+            activeFault={activeFault}
           />
         </div>
       </div>

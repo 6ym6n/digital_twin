@@ -39,6 +39,15 @@ add_block('simulink/User-Defined Functions/MATLAB System', blk, 'Position',[220 
 % Point it at our System object
 set_param(blk, 'System', 'MQTTPumpTwin');
 
+% MQTT I/O is not code-generation compatible. Run this block in interpreted mode.
+% This avoids codegen-phase errors (e.g., try/catch not supported).
+try
+    set_param(blk, 'SimulateUsing', 'Interpreted execution');
+catch
+    % Some MATLAB releases use a different parameter name. If this fails,
+    % set it manually in the block mask: "Simulate using" -> "Interpreted execution".
+end
+
 % (Optional) Tune properties here. Most users will configure via block mask.
 % Example:
 % set_param(blk, 'Host', 'localhost');

@@ -177,7 +177,13 @@ class MQTTBridge:
 
     # ---- Publishing commands ----
 
-    def publish_command(self, command: str, fault_type: Optional[str] = None, request_id: Optional[str] = None) -> None:
+    def publish_command(
+        self,
+        command: str,
+        fault_type: Optional[str] = None,
+        request_id: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> None:
         payload: Dict[str, Any] = {
             "pump_id": self.config.pump_id,
             "request_id": request_id or f"req-{int(time.time()*1000)}",
@@ -186,6 +192,10 @@ class MQTTBridge:
         }
         if fault_type is not None:
             payload["fault_type"] = fault_type
+
+        if params:
+            # Pass-through for simulator-specific knobs (e.g. temperature_target)
+            payload.update(params)
 
         self._client.publish(
             self.config.command_topic,

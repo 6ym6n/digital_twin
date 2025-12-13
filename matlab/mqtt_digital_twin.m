@@ -1,5 +1,6 @@
 function mqtt_digital_twin(varargin)
 %MQTT_DIGITAL_TWIN MATLAB-based pump digital twin over MQTT.
+%#ok<*DEFNU>
 %
 % Publishes telemetry at ~1 Hz to:
 %   {MQTT_BASE_TOPIC}/{MQTT_PUMP_ID}/telemetry
@@ -34,6 +35,21 @@ addParameter(p,'NominalCurrent', 10.0);
 addParameter(p,'NominalVibration', 1.5);
 addParameter(p,'NominalPressure', 5.0);
 addParameter(p,'NominalTemperature', 65.0);
+% Safety/realism: cap temperature so faults don't grow unbounded
+addParameter(p,'MaxTemperature', 120.0);
+% Realism: first-order dynamics toward targets + small noise (oscillation)
+addParameter(p,'DynamicsAlpha', 0.35); % 0..1 (higher = faster convergence)
+addParameter(p,'NoiseScale', 1.0);     % scales per-signal noise amplitudes
+% Value bounds (used after dynamics)
+addParameter(p,'MinVoltage', 0.0);
+addParameter(p,'MaxVoltage', 260.0);
+addParameter(p,'MinCurrent', 0.0);
+addParameter(p,'MaxCurrent', 20.0);
+addParameter(p,'MinVibration', 0.0);
+addParameter(p,'MaxVibration', 12.0);
+addParameter(p,'MinPressure', 0.0);
+addParameter(p,'MaxPressure', 12.0);
+addParameter(p,'MinTemperature', -20.0);
 parse(p, varargin{:});
 
 cfg = p.Results;
@@ -47,6 +63,23 @@ state = struct();
 state.fault_state = 'NORMAL';
 state.fault_start = NaN;
 state.seq = uint64(0);
+state.signals = struct();
+state.signals.voltage = cfg.NominalVoltage * randUniform(0.98, 1.02);
+state.signals.vibration = cfg.NominalVibration * randUniform(0.8, 1.1);
+state.signals.pressure = cfg.NominalPressure * randUniform(0.95, 1.05);
+state.signals.temperature = cfg.NominalTemperature + randUniform(-3, 3);
+state.signals.amps_A = cfg.NominalCurrent * randUniform(0.98, 1.02);
+state.signals.amps_B = cfg.NominalCurrent * randUniform(0.98, 1.02);
+state.signals.amps_C = cfg.NominalCurrent * randUniform(0.98, 1.02);
+
+% Emergency stop state (true = publish zeros)
+state.is_stopped = false;
+
+% Optional setpoints (NaN = inactive)
+state.setpoints = struct();
+state.setpoints.temperature = NaN;
+state.bands = struct();
+state.bands.temperature = 2.0;
 
 fprintf('MATLAB Digital Twin (MQTT)\n');
 fprintf('  Broker: %s:%d\n', cfg.Host, cfg.Port);
@@ -58,7 +91,7 @@ client = createMqttClient(cfg.Host, cfg.Port);
 
 % Subscribe to command topic
 try
-    subscribe(client, commandTopic);
+    mqttSubscribe(client, commandTopic);
 catch subscribeErr
     error('Failed to subscribe to command topic (%s): %s', commandTopic, subscribeErr.message);
 end
@@ -88,42 +121,137 @@ while true
     state.seq = state.seq + 1;
     dur = faultDurationSeconds(state);
 
-    % Base signals
-    voltage = cfg.NominalVoltage * randUniform(0.98, 1.02);
-    vibration = cfg.NominalVibration * randUniform(0.8, 1.1);
-    pressure = cfg.NominalPressure * randUniform(0.95, 1.05);
-    temperature = cfg.NominalTemperature + randUniform(-3, 3);
+    % Emergency stop: publish exact zeros (no noise / no oscillation)
+    if state.is_stopped
+        voltage = 0;
+        vibration = 0;
+        pressure = 0;
+        temperature = 0;
+        a = 0;
+        b = 0;
+        c = 0;
+        imbalance_pct = 0;
 
-    a = cfg.NominalCurrent * randUniform(0.98, 1.02);
-    b = cfg.NominalCurrent * randUniform(0.98, 1.02);
-    c = cfg.NominalCurrent * randUniform(0.98, 1.02);
+        telemetry = struct();
+        telemetry.pump_id = cfg.PumpId;
+        telemetry.timestamp = utcNowIso();
+        telemetry.seq = double(state.seq);
+        telemetry.fault_state = 'NORMAL';
+        telemetry.fault_duration_s = 0;
+        telemetry.amps_A = a;
+        telemetry.amps_B = b;
+        telemetry.amps_C = c;
+        telemetry.imbalance_pct = imbalance_pct;
+        telemetry.voltage = voltage;
+        telemetry.vibration = vibration;
+        telemetry.pressure = pressure;
+        telemetry.temperature = temperature;
+
+        payload = jsonencode(telemetry);
+        try
+            mqttPublish(client, telemetryTopic, payload);
+        catch pubErr
+            warning('mqtt_digital_twin:PublishFailed', 'Failed to publish telemetry: %s', pubErr.message);
+        end
+
+        pause(period);
+        continue;
+    end
+
+    alpha = min(max(cfg.DynamicsAlpha, 0.0), 1.0);
+
+    % Base targets (nominal with small jitter)
+    voltageT = cfg.NominalVoltage * randUniform(0.98, 1.02);
+    vibrationT = cfg.NominalVibration * randUniform(0.8, 1.1);
+    pressureT = cfg.NominalPressure * randUniform(0.95, 1.05);
+    temperatureT = cfg.NominalTemperature + randUniform(-3, 3);
+
+    aT = cfg.NominalCurrent * randUniform(0.98, 1.02);
+    bT = cfg.NominalCurrent * randUniform(0.98, 1.02);
+    cT = cfg.NominalCurrent * randUniform(0.98, 1.02);
 
     % Fault behavior (mirrors the Python simulator logic)
     switch upper(string(state.fault_state))
         case 'WINDING_DEFECT'
-            c = c * (1.0 + min(0.05 + double(dur) * 0.01, 0.25));
-            temperature = cfg.NominalTemperature + 15 + double(dur) * 2;
+            cT = cT * (1.0 + min(0.05 + double(dur) * 0.01, 0.25));
+            temperatureT = cfg.NominalTemperature + 15 + double(dur) * 2;
         case 'SUPPLY_FAULT'
-            voltage = randUniform(190, 207);
+            voltageT = randUniform(190, 207);
         case 'CAVITATION'
-            vibration = 5.0 + randUniform(0, 3.0);
+            vibrationT = 5.0 + randUniform(0, 3.0);
             if rand() < 0.3
-                vibration = vibration + randUniform(2, 5);
+                vibrationT = vibrationT + randUniform(2, 5);
             end
-            pressure = max(0.0, cfg.NominalPressure + randUniform(-1.5, 0.5));
+            pressureT = max(0.0, cfg.NominalPressure + randUniform(-1.5, 0.5));
         case 'BEARING_WEAR'
-            vibration = cfg.NominalVibration + 1.5 + double(dur) * 0.1 + randUniform(-0.3, 0.5);
-            temperature = cfg.NominalTemperature + 5 + randUniform(0, 3);
+            vibrationT = cfg.NominalVibration + 1.5 + double(dur) * 0.1 + randUniform(-0.3, 0.5);
+            temperatureT = cfg.NominalTemperature + 5 + randUniform(0, 3);
         case 'OVERLOAD'
-            a = a * randUniform(1.15, 1.30);
-            b = b * randUniform(1.15, 1.30);
-            c = c * randUniform(1.15, 1.30);
-            voltage = cfg.NominalVoltage * randUniform(0.95, 0.98);
-            pressure = cfg.NominalPressure * randUniform(1.1, 1.3);
-            temperature = cfg.NominalTemperature + 10 + randUniform(0, 5);
+            aT = aT * randUniform(1.15, 1.30);
+            bT = bT * randUniform(1.15, 1.30);
+            cT = cT * randUniform(1.15, 1.30);
+            voltageT = cfg.NominalVoltage * randUniform(0.95, 0.98);
+            pressureT = cfg.NominalPressure * randUniform(1.1, 1.3);
+            temperatureT = cfg.NominalTemperature + 10 + randUniform(0, 5);
         otherwise
             % NORMAL
     end
+
+    % Fault thresholds / bounds (targets are capped, then signal converges + oscillates)
+    % If a temperature setpoint is active, lock temperature into a band around it.
+    tempMin = cfg.MinTemperature;
+    tempMax = cfg.MaxTemperature;
+    if isfinite(state.setpoints.temperature)
+        band = state.bands.temperature;
+        if ~isfinite(band) || band <= 0
+            band = 2.0;
+        end
+        sp = state.setpoints.temperature;
+        temperatureT = sp;
+        tempMin = max(cfg.MinTemperature, sp - band);
+        tempMax = min(cfg.MaxTemperature, sp + band);
+    end
+
+    temperatureT = min(max(temperatureT, tempMin), tempMax);
+    voltageT = min(max(voltageT, cfg.MinVoltage), cfg.MaxVoltage);
+    vibrationT = min(max(vibrationT, cfg.MinVibration), cfg.MaxVibration);
+    pressureT = min(max(pressureT, cfg.MinPressure), cfg.MaxPressure);
+    aT = min(max(aT, cfg.MinCurrent), cfg.MaxCurrent);
+    bT = min(max(bT, cfg.MinCurrent), cfg.MaxCurrent);
+    cT = min(max(cT, cfg.MinCurrent), cfg.MaxCurrent);
+
+    % Noise amplitudes (absolute units) - scaled by NoiseScale
+    vNoise = max(0.5, cfg.NominalVoltage * 0.005) * cfg.NoiseScale;
+    pNoise = max(0.02, cfg.NominalPressure * 0.01) * cfg.NoiseScale;
+    vibNoise = max(0.03, cfg.NominalVibration * 0.05) * cfg.NoiseScale;
+    % If we have a setpoint band, set noise relative to that band so we stay inside it.
+    if isfinite(state.setpoints.temperature)
+        band = state.bands.temperature;
+        if ~isfinite(band) || band <= 0
+            band = 2.0;
+        end
+        tNoise = max(0.05, band / 3.0) * cfg.NoiseScale;
+    else
+        tNoise = max(0.2, 0.5) * cfg.NoiseScale;
+    end
+    iNoise = max(0.05, cfg.NominalCurrent * 0.01) * cfg.NoiseScale;
+
+    % First-order convergence + oscillation around target
+    state.signals.voltage = approachToTarget(state.signals.voltage, voltageT, alpha, vNoise, cfg.MinVoltage, cfg.MaxVoltage);
+    state.signals.pressure = approachToTarget(state.signals.pressure, pressureT, alpha, pNoise, cfg.MinPressure, cfg.MaxPressure);
+    state.signals.vibration = approachToTarget(state.signals.vibration, vibrationT, alpha, vibNoise, cfg.MinVibration, cfg.MaxVibration);
+    state.signals.temperature = approachToTarget(state.signals.temperature, temperatureT, alpha, tNoise, tempMin, tempMax);
+    state.signals.amps_A = approachToTarget(state.signals.amps_A, aT, alpha, iNoise, cfg.MinCurrent, cfg.MaxCurrent);
+    state.signals.amps_B = approachToTarget(state.signals.amps_B, bT, alpha, iNoise, cfg.MinCurrent, cfg.MaxCurrent);
+    state.signals.amps_C = approachToTarget(state.signals.amps_C, cT, alpha, iNoise, cfg.MinCurrent, cfg.MaxCurrent);
+
+    a = state.signals.amps_A;
+    b = state.signals.amps_B;
+    c = state.signals.amps_C;
+    voltage = state.signals.voltage;
+    vibration = state.signals.vibration;
+    pressure = state.signals.pressure;
+    temperature = state.signals.temperature;
 
     imbalance_pct = computeImbalancePct(a, b, c);
 
@@ -145,9 +273,9 @@ while true
     payload = jsonencode(telemetry);
 
     try
-        publish(client, telemetryTopic, payload);
+        mqttPublish(client, telemetryTopic, payload);
     catch pubErr
-        warning('Failed to publish telemetry: %s', pubErr.message);
+        warning('mqtt_digital_twin:PublishFailed', 'Failed to publish telemetry: %s', pubErr.message);
     end
 
     pause(period);
@@ -174,16 +302,65 @@ end
         try
             % Some releases return a timetable/table, others a struct.
             % Try to read up to 10 messages without blocking.
-            data = read(cli, 10, 'Topic', commandTopic, 'Timeout', 0);
+            % Note: older/newer MQTT client variants differ in supported arguments.
+            data = [];
+            try
+                data = mqttRead(cli, 10, 'Topic', commandTopic, 'Timeout', 0);
+            catch
+                % ignore and fall back
+            end
+
+            if isempty(data)
+                try
+                    data = mqttRead(cli, 10);
+                catch
+                end
+            end
+
+            if isempty(data)
+                try
+                    data = mqttRead(cli);
+                catch
+                end
+            end
+
             if isempty(data)
                 return;
             end
 
             % If table/timetable, expect a Data variable
             if istable(data) || istimetable(data)
-                if any(strcmp('Data', data.Properties.VariableNames))
+                varNames = data.Properties.VariableNames;
+                hasData = any(strcmp('Data', varNames));
+                hasTopic = any(strcmp('Topic', varNames));
+                if hasData
                     for i = 1:height(data)
-                        applyCommand(data.Data{i});
+                        if hasTopic
+                            try
+                                t = data.Topic(i);
+                                if iscell(t)
+                                    t = t{1};
+                                end
+                                if isstring(t)
+                                    t = char(t);
+                                end
+                                if ischar(t) && ~strcmp(t, commandTopic)
+                                    continue;
+                                end
+                            catch
+                                % If topic parsing fails, still attempt to apply.
+                            end
+                        end
+
+                        try
+                            msg = data.Data(i);
+                            if iscell(msg)
+                                msg = msg{1};
+                            end
+                            applyCommand(msg);
+                        catch
+                            % ignore per-row failures
+                        end
                     end
                 end
                 return;
@@ -192,6 +369,18 @@ end
             % If struct array, try Data field
             if isstruct(data)
                 for i = 1:numel(data)
+                    if isfield(data(i),'Topic')
+                        try
+                            t = data(i).Topic;
+                            if isstring(t)
+                                t = char(t);
+                            end
+                            if ischar(t) && ~strcmp(t, commandTopic)
+                                continue;
+                            end
+                        catch
+                        end
+                    end
                     if isfield(data(i),'Data')
                         applyCommand(data(i).Data);
                     end
@@ -227,21 +416,125 @@ end
         cmd = upper(string(cmdObj.command));
         switch cmd
             case 'INJECT_FAULT'
+                state.is_stopped = false;
                 if isfield(cmdObj,'fault_type')
                     f = upper(string(cmdObj.fault_type));
                     fprintf('[CMD] INJECT_FAULT %s\n', f);
                     state.fault_state = char(f);
                     state.fault_start = ticNowSeconds();
                 end
+
+                % Optional setpoint controls (e.g. temperature_target=90, temperature_band=2)
+                if isfield(cmdObj, 'temperature_target')
+                    try
+                        state.setpoints.temperature = double(cmdObj.temperature_target);
+                    catch
+                    end
+                end
+                if isfield(cmdObj, 'temperature_band')
+                    try
+                        state.bands.temperature = double(cmdObj.temperature_band);
+                    catch
+                    end
+                end
             case 'RESET'
                 fprintf('[CMD] RESET\n');
                 state.fault_state = 'NORMAL';
                 state.fault_start = NaN;
+                state.setpoints.temperature = NaN;
+                state.is_stopped = false;
             case 'EMERGENCY_STOP'
                 fprintf('[CMD] EMERGENCY_STOP\n');
                 state.fault_state = 'NORMAL';
                 state.fault_start = NaN;
+                state.setpoints.temperature = NaN;
+                state.is_stopped = true;
         end
+    end
+
+    function mqttSubscribe(cli, topic)
+        if isempty(cli)
+            return;
+        end
+
+        if ismethod(cli, 'subscribe')
+            cli.subscribe(topic);
+            return;
+        end
+
+        % Function-based API (package-qualified)
+        try
+            icomm.mqtt.subscribe(cli, topic);
+            return;
+        catch
+        end
+
+        % Fallback to plain function call
+        subscribe(cli, topic);
+    end
+
+    function mqttPublish(cli, topic, payload)
+        if isempty(cli)
+            return;
+        end
+
+        % Method-based APIs
+        if ismethod(cli, 'publish')
+            cli.publish(topic, payload);
+            return;
+        end
+        if ismethod(cli, 'write')
+            cli.write(topic, payload);
+            return;
+        end
+        if ismethod(cli, 'send')
+            cli.send(topic, payload);
+            return;
+        end
+
+        % Function-based APIs (try fully qualified first)
+        try
+            icomm.mqtt.publish(cli, topic, payload);
+            return;
+        catch
+        end
+
+        try
+            mqtt.publish(cli, topic, payload);
+            return;
+        catch
+        end
+
+        % Last resort: only call publish(...) if it's not MATLAB codetools publish.
+        pubPath = which('publish');
+        if ~isempty(pubPath) && contains(lower(pubPath), [filesep 'codetools' filesep])
+            error('mqtt_digital_twin:PublishNameClash', 'MATLAB codetools publish is shadowing MQTT publish.');
+        end
+
+        publish(cli, topic, payload);
+    end
+
+    function data = mqttRead(cli, varargin)
+        if isempty(cli)
+            data = [];
+            return;
+        end
+
+        % Prefer method-based read if present
+        if ismethod(cli, 'read')
+            data = cli.read(varargin{:});
+            return;
+        end
+
+        % Function-based read (package-qualified)
+        try
+            data = icomm.mqtt.read(cli, varargin{:});
+            return;
+        catch
+        end
+
+        % Fallback to plain read(...) (some releases expose it as a function)
+        data = read(cli, varargin{:});
     end
 end
 
@@ -279,6 +572,18 @@ if avg == 0
 end
 maxDev = max([abs(a-avg), abs(b-avg), abs(c-avg)]);
 pct = (maxDev / avg) * 100.0;
+end
+
+function y = approachToTarget(x, target, alpha, noiseStd, minVal, maxVal)
+% First-order lag toward target + gaussian noise; then clamp.
+if isempty(x) || ~isfinite(x)
+    x = target;
+end
+if ~isfinite(target)
+    target = x;
+end
+y = x + alpha * (target - x) + noiseStd * randn();
+y = min(max(y, minVal), maxVal);
 end
 
 function s = utcNowIso()

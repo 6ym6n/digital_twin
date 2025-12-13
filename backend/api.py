@@ -50,6 +50,9 @@ def _get_latest_sensor_reading() -> Optional[Dict]:
 # Pydantic models for API
 class FaultRequest(BaseModel):
     fault_type: str
+    # Optional: allow UI/API to request a specific target band for the external simulator
+    temperature_target: Optional[float] = None
+    temperature_band: Optional[float] = None
 
 class ChatRequest(BaseModel):
     message: str
@@ -164,7 +167,12 @@ async def inject_fault(request: FaultRequest):
         if fault_id == "NORMAL":
             mq_bridge.publish_command("RESET")
         else:
-            mq_bridge.publish_command("INJECT_FAULT", fault_type=fault_id)
+            params: Dict[str, Any] = {}
+            if request.temperature_target is not None:
+                params["temperature_target"] = float(request.temperature_target)
+            if request.temperature_band is not None:
+                params["temperature_band"] = float(request.temperature_band)
+            mq_bridge.publish_command("INJECT_FAULT", fault_type=fault_id, params=params or None)
         return {"status": "success", "message": f"Command sent via MQTT: {fault_id}"}
 
     # Simulator mode
