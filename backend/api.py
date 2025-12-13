@@ -150,17 +150,49 @@ async def inject_fault(request: FaultRequest):
         return {"status": "success", "message": f"Fault injected: {fault_type.value}"}
 
 
+@app.post("/api/emergency-stop")
+async def emergency_stop():
+    """
+    Emergency stop - immediately reset pump to normal operation.
+    Called automatically when critical conditions are detected.
+    """
+    if pump_simulator is None:
+        raise HTTPException(status_code=503, detail="Pump simulator not initialized")
+    
+    pump_simulator.reset_fault()
+    return {
+        "status": "success",
+        "message": "🛑 EMERGENCY STOP EXECUTED - Pump reset to safe state",
+        "action": "PUMP_STOPPED"
+    }
+
+
 @app.post("/api/diagnose")
 async def get_diagnosis(request: DiagnosticRequest):
-    """Get AI diagnostic for current sensor data"""
+    """Get AI diagnostic for current sensor data including shutdown decision"""
     if ai_agent is None:
         raise HTTPException(status_code=503, detail="AI Agent not initialized")
     
     try:
         result = ai_agent.get_diagnostic(request.sensor_data)
+        
+        # Extract shutdown decision
+        shutdown = result.get("shutdown_decision", {})
+        
         return {
             "diagnosis": result["diagnosis"],
             "fault_detected": result["fault_detected"],
+            "shutdown_decision": {
+                "action": shutdown.get("action", "NORMAL_OPERATION"),
+                "urgency": shutdown.get("urgency", "OK"),
+                "icon": shutdown.get("icon", "✅"),
+                "message": shutdown.get("message", ""),
+                "message_en": shutdown.get("message_en", ""),
+                "recommendation": shutdown.get("recommendation", ""),
+                "recommendation_en": shutdown.get("recommendation_en", ""),
+                "critical_conditions": shutdown.get("critical_conditions", []),
+                "warning_conditions": shutdown.get("warning_conditions", [])
+            },
             "references": [
                 {"page": c["page"], "score": c["score"]} 
                 for c in result["context_used"]

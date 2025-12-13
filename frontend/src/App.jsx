@@ -142,9 +142,40 @@ function FaultButton({ id, name, icon, active, onClick, disabled }) {
 }
 
 // =====================================================
-// Diagnosis Panel Component
+// Diagnosis Panel Component with Shutdown Decision
 // =====================================================
-function DiagnosisPanel({ diagnosis, isLoading, onRefresh }) {
+function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onEmergencyStop }) {
+  // Determine shutdown banner style
+  const getShutdownStyle = () => {
+    if (!shutdownDecision) return null
+    
+    switch (shutdownDecision.action) {
+      case 'IMMEDIATE_SHUTDOWN':
+        return {
+          bg: 'bg-red-500/20 border-red-500',
+          text: 'text-red-400',
+          icon: '⛔',
+          animate: 'animate-pulse'
+        }
+      case 'CONTINUE_THEN_STOP':
+        return {
+          bg: 'bg-amber-500/20 border-amber-500',
+          text: 'text-amber-400',
+          icon: '⚠️',
+          animate: ''
+        }
+      default:
+        return {
+          bg: 'bg-green-500/20 border-green-500',
+          text: 'text-green-400',
+          icon: '✅',
+          animate: ''
+        }
+    }
+  }
+  
+  const style = getShutdownStyle()
+
   return (
     <div className="glass rounded-xl p-4">
       <div className="flex items-center justify-between mb-3">
@@ -160,6 +191,86 @@ function DiagnosisPanel({ diagnosis, isLoading, onRefresh }) {
           <RefreshCw className={`w-4 h-4 text-slate-400 ${isLoading ? 'animate-spin' : ''}`} />
         </button>
       </div>
+      
+      {/* Shutdown Decision Banner */}
+      {shutdownDecision && shutdownDecision.action !== 'NORMAL_OPERATION' && (
+        <div className={`mb-4 p-4 rounded-lg border-2 ${style.bg} ${style.animate}`}>
+          <div className="flex items-start gap-3">
+            <span className="text-2xl">{style.icon}</span>
+            <div className="flex-1">
+              <h4 className={`font-bold ${style.text} mb-1`}>
+                {shutdownDecision.action === 'IMMEDIATE_SHUTDOWN' 
+                  ? '🚨 ARRÊT IMMÉDIAT REQUIS' 
+                  : '⚠️ ATTENTION REQUISE'}
+              </h4>
+              <p className={`text-sm ${style.text} mb-2`}>
+                {shutdownDecision.message}
+              </p>
+              
+              {/* Critical Conditions */}
+              {shutdownDecision.critical_conditions?.length > 0 && (
+                <div className="mb-2">
+                  <p className="text-xs text-red-300 font-semibold mb-1">Conditions critiques:</p>
+                  {shutdownDecision.critical_conditions.map((cond, i) => (
+                    <div key={i} className="text-xs text-red-200 ml-2">
+                      • {cond.parameter}: <span className="font-mono font-bold">{cond.value}</span> 
+                      <span className="text-red-400"> (seuil: {cond.threshold})</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              
+              {/* Warning Conditions */}
+              {shutdownDecision.warning_conditions?.length > 0 && (
+                <div className="mb-2">
+                  <p className="text-xs text-amber-300 font-semibold mb-1">Avertissements:</p>
+                  {shutdownDecision.warning_conditions.map((cond, i) => (
+                    <div key={i} className="text-xs text-amber-200 ml-2">
+                      • {cond.parameter}: <span className="font-mono font-bold">{cond.value}</span>
+                      <span className="text-amber-400"> (seuil: {cond.threshold})</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              
+              {/* Recommendation */}
+              <div className={`mt-2 pt-2 border-t ${shutdownDecision.action === 'IMMEDIATE_SHUTDOWN' ? 'border-red-500/30' : 'border-amber-500/30'}`}>
+                <p className="text-xs text-slate-300">
+                  <span className="font-semibold">📋 Recommandation:</span> {shutdownDecision.recommendation}
+                </p>
+              </div>
+              
+              {/* Emergency Stop Button */}
+              {onEmergencyStop && (
+                <button
+                  onClick={() => onEmergencyStop('Manual emergency stop')}
+                  className={`mt-3 w-full py-2 px-4 rounded-lg font-bold text-sm transition-all
+                    ${shutdownDecision.action === 'IMMEDIATE_SHUTDOWN' 
+                      ? 'bg-red-600 hover:bg-red-700 text-white animate-pulse' 
+                      : 'bg-amber-600 hover:bg-amber-700 text-white'}
+                  `}
+                >
+                  🛑 {shutdownDecision.action === 'IMMEDIATE_SHUTDOWN' 
+                    ? 'ARRÊT D\'URGENCE IMMÉDIAT' 
+                    : 'ARRÊTER APRÈS DIAGNOSTIC'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Normal Operation Banner */}
+      {shutdownDecision && shutdownDecision.action === 'NORMAL_OPERATION' && diagnosis && (
+        <div className="mb-4 p-3 rounded-lg bg-green-500/10 border border-green-500/30">
+          <div className="flex items-center gap-2">
+            <span className="text-lg">✅</span>
+            <span className="text-green-400 text-sm font-medium">
+              Fonctionnement normal - Aucune action requise
+            </span>
+          </div>
+        </div>
+      )}
       
       <div className="bg-slate-800/50 rounded-lg p-4 max-h-64 overflow-y-auto">
         {isLoading ? (
@@ -695,11 +806,14 @@ function App() {
   const [activeFault, setActiveFault] = useState('NORMAL')
   const [diagnosis, setDiagnosis] = useState('')
   const [diagnosisLoading, setDiagnosisLoading] = useState(false)
+  const [shutdownDecision, setShutdownDecision] = useState(null)
   const [chatMessages, setChatMessages] = useState([])
   const [chatLoading, setChatLoading] = useState(false)
   const [faultTypes, setFaultTypes] = useState([])
   
   const wsRef = useRef(null)
+  const sensorDataRef = useRef(null)  // Ref to always have latest sensor data
+  const emergencyStopInProgressRef = useRef(false)
 
   // Fetch fault types on mount
   useEffect(() => {
@@ -726,6 +840,7 @@ function App() {
         const message = JSON.parse(event.data)
         if (message.type === 'sensor_update') {
           setSensorData(message.data)
+          sensorDataRef.current = message.data  // Keep ref updated
           setSensorHistory(prev => {
             const newHistory = [...prev, message.data]
             return newHistory.slice(-60)  // Keep last 60 readings
@@ -760,6 +875,33 @@ function App() {
     }
   }, [])
 
+  // 🛑 AUTO-MONITORING: Check for critical conditions on every sensor update
+  useEffect(() => {
+    if (!sensorData || activeFault === 'NORMAL') return
+    if (emergencyStopInProgressRef.current) return
+    
+    const temp = sensorData.temperature || 0
+    const vibration = sensorData.vibration || 0
+    const voltage = sensorData.voltage || 230
+    const imbalance = sensorData.amperage?.imbalance_pct || 0
+    const pressure = sensorData.pressure || 4
+    
+    // Critical thresholds - same as backend
+    const isCritical = (
+      temp > 90 ||           // Temperature > 90°C
+      vibration > 10 ||      // Vibration > 10 mm/s
+      imbalance > 15 ||      // Phase imbalance > 15%
+      voltage < 180 ||       // Severe undervoltage
+      voltage > 270 ||       // Severe overvoltage
+      pressure <= 0          // Dry running
+    )
+    
+    if (isCritical) {
+      // Auto-trigger diagnosis which will handle the emergency stop
+      handleRefreshDiagnosis()
+    }
+  }, [sensorData, activeFault])
+
   // Inject fault
   const handleInjectFault = async (faultId) => {
     try {
@@ -771,12 +913,14 @@ function App() {
       
       if (response.ok) {
         setActiveFault(faultId)
+        emergencyStopInProgressRef.current = false
         
         // Auto-trigger diagnosis for non-normal faults
         if (faultId !== 'NORMAL') {
           setTimeout(() => handleRefreshDiagnosis(), 2000)  // Wait for sensor data to update
         } else {
           setDiagnosis('')
+          setShutdownDecision(null)
         }
       }
     } catch (error) {
@@ -784,21 +928,48 @@ function App() {
     }
   }
 
-  // Refresh diagnosis
+  // Emergency stop function
+  const handleEmergencyStop = async (reason) => {
+    if (emergencyStopInProgressRef.current) return
+    emergencyStopInProgressRef.current = true
+
+    try {
+      const response = await fetch(`${API_BASE}/api/emergency-stop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      })
+      
+      if (response.ok) {
+        setActiveFault('NORMAL')
+      }
+    } catch (error) {
+      console.error('Failed to execute emergency stop:', error)
+      emergencyStopInProgressRef.current = false
+    }
+  }
+
+  // Refresh diagnosis - uses ref to get latest sensor data
   const handleRefreshDiagnosis = async () => {
-    if (!sensorData) return
+    const currentSensorData = sensorDataRef.current || sensorData
+    if (!currentSensorData) return
     
     setDiagnosisLoading(true)
     try {
       const response = await fetch(`${API_BASE}/api/diagnose`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sensor_data: sensorData })
+        body: JSON.stringify({ sensor_data: currentSensorData })
       })
       
       if (response.ok) {
         const data = await response.json()
         setDiagnosis(data.diagnosis)
+        setShutdownDecision(data.shutdown_decision || null)
+        
+        // 🛑 AUTO EMERGENCY STOP if critical conditions detected
+        if (data.shutdown_decision?.action === 'IMMEDIATE_SHUTDOWN') {
+          await handleEmergencyStop(data.shutdown_decision.message)
+        }
       } else {
         const error = await response.json()
         setDiagnosis(`Error: ${error.detail}`)
@@ -1030,8 +1201,10 @@ function App() {
           {/* AI Diagnosis */}
           <DiagnosisPanel
             diagnosis={diagnosis}
+            shutdownDecision={shutdownDecision}
             isLoading={diagnosisLoading}
             onRefresh={handleRefreshDiagnosis}
+            onEmergencyStop={handleEmergencyStop}
           />
         </div>
       </div>

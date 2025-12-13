@@ -131,6 +131,167 @@ THERMAL:
 """
         return sensor_text
     
+    def _evaluate_shutdown_decision(self, sensor_data: Dict) -> Dict[str, any]:
+        """
+        Evaluate whether the pump should be stopped based on sensor readings.
+        
+        Based on Grundfos manual recommendations:
+        - Page 5: "Do NOT stop the pump immediately" for initial diagnosis
+        - Critical conditions require immediate shutdown
+        
+        Thresholds:
+        - Imbalance > 5%: From Grundfos manual Page 7
+        - Voltage ±10%: From Grundfos manual Page 8
+        - Vibration > 5 mm/s: ISO 10816 standard for pumps
+        - Temperature > 80°C: IEC Class B motor insulation limit
+        
+        Args:
+            sensor_data: Current sensor readings
+            
+        Returns:
+            Dictionary with shutdown decision and reasoning
+        """
+        amps = sensor_data.get('amperage', {})
+        imbalance = amps.get('imbalance_pct', 0)
+        voltage = sensor_data.get('voltage', 230)
+        vibration = sensor_data.get('vibration', 0)
+        temperature = sensor_data.get('temperature', 65)
+        pressure = sensor_data.get('pressure', 4)
+        
+        # Critical thresholds - IMMEDIATE SHUTDOWN REQUIRED
+        critical_conditions = []
+        
+        # Temperature > 90°C: Imminent motor damage
+        if temperature > 90:
+            critical_conditions.append({
+                "parameter": "Temperature",
+                "value": f"{temperature:.1f}°C",
+                "threshold": "90°C",
+                "reason": "Motor insulation damage imminent - risk of fire"
+            })
+        
+        # Extreme vibration > 10 mm/s: Mechanical destruction
+        if vibration > 10:
+            critical_conditions.append({
+                "parameter": "Vibration",
+                "value": f"{vibration:.2f} mm/s",
+                "threshold": "10 mm/s",
+                "reason": "Severe mechanical damage in progress - bearing/impeller destruction"
+            })
+        
+        # Severe phase imbalance > 15%: Winding burnout risk
+        if imbalance > 15:
+            critical_conditions.append({
+                "parameter": "Phase Imbalance",
+                "value": f"{imbalance:.1f}%",
+                "threshold": "15%",
+                "reason": "Severe winding damage risk - motor burnout imminent"
+            })
+        
+        # Voltage < 180V or > 270V (>20% deviation): Motor damage
+        if voltage < 180 or voltage > 270:
+            critical_conditions.append({
+                "parameter": "Voltage",
+                "value": f"{voltage:.1f}V",
+                "threshold": "180-270V (±20%)",
+                "reason": "Extreme voltage - immediate motor protection required"
+            })
+        
+        # Zero or negative pressure: Dry running
+        if pressure <= 0:
+            critical_conditions.append({
+                "parameter": "Pressure",
+                "value": f"{pressure:.2f} bar",
+                "threshold": "> 0 bar",
+                "reason": "Dry running detected - pump damage imminent"
+            })
+        
+        # Warning thresholds - Continue for diagnosis, then decide
+        warning_conditions = []
+        
+        # Temperature 80-90°C: Monitor closely
+        if 80 <= temperature <= 90:
+            warning_conditions.append({
+                "parameter": "Temperature",
+                "value": f"{temperature:.1f}°C",
+                "threshold": "80°C",
+                "reason": "Elevated temperature - monitor and diagnose cause"
+            })
+        
+        # Vibration 5-10 mm/s: Needs attention
+        if 5 < vibration <= 10:
+            warning_conditions.append({
+                "parameter": "Vibration",
+                "value": f"{vibration:.2f} mm/s",
+                "threshold": "5 mm/s",
+                "reason": "High vibration - continue briefly for diagnosis"
+            })
+        
+        # Phase imbalance 5-15%: Investigate
+        if 5 < imbalance <= 15:
+            warning_conditions.append({
+                "parameter": "Phase Imbalance",
+                "value": f"{imbalance:.1f}%",
+                "threshold": "5%",
+                "reason": "Current imbalance detected - check windings after diagnosis"
+            })
+        
+        # Voltage deviation 10-20%: Poor supply
+        if (180 <= voltage < 207) or (253 < voltage <= 270):
+            warning_conditions.append({
+                "parameter": "Voltage",
+                "value": f"{voltage:.1f}V",
+                "threshold": "±10% (207-253V)",
+                "reason": "Voltage out of tolerance - contact power supplier"
+            })
+        
+        # Low pressure: Possible cavitation
+        if 0 < pressure < 2:
+            warning_conditions.append({
+                "parameter": "Pressure",
+                "value": f"{pressure:.2f} bar",
+                "threshold": "2 bar",
+                "reason": "Low pressure - check for cavitation or blockage"
+            })
+        
+        # Determine shutdown decision
+        if critical_conditions:
+            return {
+                "action": "IMMEDIATE_SHUTDOWN",
+                "urgency": "CRITICAL",
+                "icon": "⛔",
+                "message": "ARRÊT IMMÉDIAT REQUIS - Conditions critiques détectées",
+                "message_en": "IMMEDIATE SHUTDOWN REQUIRED - Critical conditions detected",
+                "critical_conditions": critical_conditions,
+                "warning_conditions": warning_conditions,
+                "recommendation": "Couper l'alimentation immédiatement. Ne pas redémarrer avant inspection complète.",
+                "recommendation_en": "Cut power immediately. Do not restart before complete inspection."
+            }
+        elif warning_conditions:
+            return {
+                "action": "CONTINUE_THEN_STOP",
+                "urgency": "WARNING",
+                "icon": "⚠️",
+                "message": "Continuer pour diagnostic, puis arrêter pour inspection",
+                "message_en": "Continue for diagnosis, then stop for inspection",
+                "critical_conditions": [],
+                "warning_conditions": warning_conditions,
+                "recommendation": "Comme recommandé par Grundfos (Page 5): Ne pas arrêter immédiatement. Effectuer les mesures pendant le fonctionnement, puis arrêter pour correction.",
+                "recommendation_en": "As recommended by Grundfos (Page 5): Do NOT stop immediately. Take measurements while running, then stop for correction."
+            }
+        else:
+            return {
+                "action": "NORMAL_OPERATION",
+                "urgency": "OK",
+                "icon": "✅",
+                "message": "Fonctionnement normal - Aucune action requise",
+                "message_en": "Normal operation - No action required",
+                "critical_conditions": [],
+                "warning_conditions": [],
+                "recommendation": "Continuer la surveillance normale.",
+                "recommendation_en": "Continue normal monitoring."
+            }
+    
     def _build_diagnostic_query(self, sensor_data: Dict) -> str:
         """
         Construct a RAG query based on sensor anomalies.
@@ -140,6 +301,13 @@ THERMAL:
         
         Returns:
             Optimized query string for RAG retrieval
+            
+        Threshold Sources:
+        - Imbalance > 5%: Grundfos Manual Page 7
+        - Voltage < 207V (10% of 230V): Grundfos Manual Page 8
+        - Vibration > 5 mm/s: ISO 10816 industrial standard
+        - Vibration 3-5 mm/s: ISO 10816 warning zone
+        - Temperature > 80°C: IEC Class B insulation standard
         """
         fault_state = sensor_data.get('fault_state', 'Normal')
         amps = sensor_data.get('amperage', {})
@@ -151,18 +319,23 @@ THERMAL:
         # Build query based on detected anomalies
         query_parts = []
         
+        # Grundfos Manual Page 7: "If the current imbalance does not exceed 5%"
         if imbalance > 5:
             query_parts.append("motor winding defect phase imbalance")
         
+        # Grundfos Manual Page 8: "voltage should be within 10% (+ or -)"
         if voltage < 207:
             query_parts.append("voltage supply fault low voltage")
         
+        # ISO 10816: Vibration > 5 mm/s = unacceptable for pumps
         if vibration > 5:
             query_parts.append("cavitation high vibration")
         
+        # IEC Class B insulation: Max operating temp 80°C
         if temperature > 80:
             query_parts.append("motor overheating causes")
         
+        # ISO 10816: Vibration 3-5 mm/s = alert zone
         if vibration > 3 and vibration <= 5:
             query_parts.append("bearing wear diagnosis")
         
@@ -266,6 +439,17 @@ Keep your response under 300 words for dashboard display."""
         # Detect if this is an actual fault
         fault_detected = sensor_data.get('fault_state', 'Normal') != 'Normal'
         
+        # Evaluate shutdown decision based on Grundfos manual recommendations
+        shutdown_decision = self._evaluate_shutdown_decision(sensor_data)
+        
+        # Log shutdown decision
+        if shutdown_decision["action"] == "IMMEDIATE_SHUTDOWN":
+            print(f"⛔ CRITICAL: {shutdown_decision['message_en']}")
+            for cond in shutdown_decision["critical_conditions"]:
+                print(f"   - {cond['parameter']}: {cond['value']} (threshold: {cond['threshold']})")
+        elif shutdown_decision["action"] == "CONTINUE_THEN_STOP":
+            print(f"⚠️  WARNING: {shutdown_decision['message_en']}")
+        
         print("✅ Diagnostic complete!\n")
         
         return {
@@ -273,6 +457,7 @@ Keep your response under 300 words for dashboard display."""
             "context_used": retrieved_chunks,
             "rag_query": rag_query,
             "fault_detected": fault_detected,
+            "shutdown_decision": shutdown_decision,
             "sensor_summary": {
                 "fault_state": sensor_data.get('fault_state'),
                 "imbalance": sensor_data.get('amperage', {}).get('imbalance_pct'),
