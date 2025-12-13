@@ -8,7 +8,7 @@ It is designed to work with the existing backend MQTT bridge:
 
 ## Requirements
 
-- MATLAB release with `mqttclient` support.
+- MATLAB release with `mqttclient` support (in MATLAB, run `which mqttclient`).
 - A running MQTT broker (e.g., Mosquitto on `localhost:1883`).
 
 ## Run
@@ -25,6 +25,20 @@ Or configure explicitly:
 ```matlab
 mqtt_digital_twin('Host','localhost','Port',1883,'PumpId','pump01','BaseTopic','digital_twin');
 ```
+
+## Run (Simulink, MATLAB R2025b)
+
+This repo includes a Simulink-friendly implementation using a **MATLAB System** block.
+
+In MATLAB:
+
+```matlab
+addpath('matlab/simulink');
+build_mqtt_pump_twin_model('ModelName','mqtt_pump_twin');
+open_system('mqtt_pump_twin');
+```
+
+Then press **Run**. The model publishes telemetry and reacts to commands using the same topics as the backend.
 
 ## Environment variables (optional)
 
