@@ -40,6 +40,16 @@ open_system('mqtt_pump_twin');
 
 Then press **Run**. The model publishes telemetry and reacts to commands using the same topics as the backend.
 
+### Simple transfer-function plant (recommended)
+
+If you want a minimal "plant" (first-order transfer functions) feeding the MQTT publisher, use:
+
+```matlab
+addpath('matlab/simulink');
+build_mqtt_pump_twin_tf_model('ModelName','mqtt_pump_twin_tf');
+open_system('mqtt_pump_twin_tf');
+```
+
 ## Environment variables (optional)
 
 The script reads these if present:

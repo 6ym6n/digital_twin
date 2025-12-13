@@ -67,7 +67,7 @@ classdef MQTTPumpTwin < matlab.System
             obj.LastPublishEpoch = MQTTPumpTwin.epochSeconds();
         end
 
-        function stepImpl(obj)
+        function stepImpl(obj, voltageIn, vibrationIn, pressureIn, temperatureIn, ampsAIn, ampsBIn, ampsCIn)
             % Process commands
             if ~obj.UseCallback
                 obj.pollCommands();
@@ -85,15 +85,16 @@ classdef MQTTPumpTwin < matlab.System
             obj.Seq = obj.Seq + 1;
             dur = obj.faultDurationSeconds(nowEpoch);
 
-            % Base signals
-            voltage     = obj.NominalVoltage * MQTTPumpTwin.randUniform(0.98, 1.02);
-            vibration   = obj.NominalVibration * MQTTPumpTwin.randUniform(0.8, 1.1);
-            pressure    = obj.NominalPressure * MQTTPumpTwin.randUniform(0.95, 1.05);
-            temperature = obj.NominalTemperature + MQTTPumpTwin.randUniform(-3, 3);
+            % Base signals come from Simulink inputs (transfer functions / plant model).
+            % If inputs are unconnected/invalid, fall back to nominal values.
+            voltage     = obj.sanitize(voltageIn, obj.NominalVoltage);
+            vibration   = obj.sanitize(vibrationIn, obj.NominalVibration);
+            pressure    = obj.sanitize(pressureIn, obj.NominalPressure);
+            temperature = obj.sanitize(temperatureIn, obj.NominalTemperature);
 
-            a = obj.NominalCurrent * MQTTPumpTwin.randUniform(0.98, 1.02);
-            b = obj.NominalCurrent * MQTTPumpTwin.randUniform(0.98, 1.02);
-            c = obj.NominalCurrent * MQTTPumpTwin.randUniform(0.98, 1.02);
+            a = obj.sanitize(ampsAIn, obj.NominalCurrent);
+            b = obj.sanitize(ampsBIn, obj.NominalCurrent);
+            c = obj.sanitize(ampsCIn, obj.NominalCurrent);
 
             % Fault behavior (mirrors existing Python simulator)
             switch upper(string(obj.FaultState))
@@ -167,15 +168,59 @@ classdef MQTTPumpTwin < matlab.System
         end
 
         function num = getNumInputsImpl(~)
-            num = 0;
+            % voltage, vibration, pressure, temperature, amps_A, amps_B, amps_C
+            num = 7;
         end
 
         function num = getNumOutputsImpl(~)
             num = 0;
         end
+
+        function varargout = getInputSizeImpl(~)
+            % All scalar signals
+            varargout = repmat({[1 1]}, 1, 7);
+        end
+
+        function varargout = getInputDataTypeImpl(~)
+            varargout = repmat({'double'}, 1, 7);
+        end
+
+        function varargout = isInputComplexImpl(~)
+            varargout = repmat({false}, 1, 7);
+        end
+
+        function varargout = isInputFixedSizeImpl(~)
+            varargout = repmat({true}, 1, 7);
+        end
+
+        function [name1,name2,name3,name4,name5,name6,name7] = getInputNamesImpl(~)
+            name1 = 'voltage';
+            name2 = 'vibration';
+            name3 = 'pressure';
+            name4 = 'temperature';
+            name5 = 'amps_A';
+            name6 = 'amps_B';
+            name7 = 'amps_C';
+        end
     end
 
     methods(Access=private)
+        function v = sanitize(~, x, defaultValue)
+            try
+                if isempty(x)
+                    v = defaultValue;
+                    return;
+                end
+                if ~isfinite(double(x))
+                    v = defaultValue;
+                    return;
+                end
+                v = double(x);
+            catch
+                v = defaultValue;
+            end
+        end
+
         function onMessage(obj, evt)
             try
                 msg = evt.Data;
