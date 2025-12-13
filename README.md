@@ -485,6 +485,10 @@ python src/ai_agent.py
 
 ## 🔧 Usage Examples
 
+## 🧪 Simulation (MQTT)
+
+See [SIMULATION.md](SIMULATION.md) for end-to-end instructions (broker → backend → frontend → MATLAB/Simulink), fault injection, manual Diagnose flow, and emergency stop behavior.
+
 ### RAG Engine:
 ```python
 from src.rag_engine import RAGEngine
