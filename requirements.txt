@@ -26,3 +26,6 @@ python-dotenv
 # Utilities
 numpy
 pandas
+
+# MQTT (MATLAB/Simulink integration)
+paho-mqtt

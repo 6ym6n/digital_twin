@@ -143,6 +143,51 @@ VITE v5.4.x  ready in xxx ms
 
 ---
 
+## 📡 Optional: Run with MQTT (External Simulator)
+
+By default, the backend uses the built-in Python simulator. If you want to **decouple simulation from the backend** (e.g., MATLAB/Simulink publishing telemetry), you can run in MQTT mode.
+
+### 1) Install and start a local MQTT broker (Windows)
+
+Install Mosquitto via winget:
+
+```powershell
+winget install -e --id EclipseFoundation.Mosquitto --accept-source-agreements --accept-package-agreements
+```
+
+After installation, the **Mosquitto Broker** Windows service usually starts automatically. If needed, you can start it in Services.
+
+### 2) (Demo) Start a fake MQTT telemetry publisher
+
+In a terminal from the project root:
+
+```powershell
+cd C:\path\to\digital_twin
+.\venv\Scripts\Activate.ps1
+python tools\mqtt_fake_matlab.py
+```
+
+### 3) Start the backend in MQTT mode
+
+In another terminal:
+
+```powershell
+cd C:\path\to\digital_twin
+.\venv\Scripts\Activate.ps1
+
+$env:SENSOR_SOURCE='mqtt'
+$env:MQTT_HOST='localhost'
+$env:MQTT_PORT='1883'
+$env:MQTT_PUMP_ID='pump01'
+$env:MQTT_BASE_TOPIC='digital_twin'
+
+python -m uvicorn backend.api:app --host 0.0.0.0 --port 8000 --reload
+```
+
+At this point, the frontend works unchanged: live sensor data streams from MQTT, and fault injection / emergency-stop publish MQTT commands.
+
+---
+
 ## 🌐 Step 7: Open the Dashboard
 
 Open your browser and go to:

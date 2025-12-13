@@ -22,13 +22,29 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.simulator import PumpSimulator, FaultType
 from src.ai_agent import MaintenanceAIAgent
+from backend.mqtt_bridge import MQTTBridge, load_mqtt_config_from_env
 
 # Global instances
 pump_simulator: Optional[PumpSimulator] = None
 ai_agent: Optional[MaintenanceAIAgent] = None
+mq_bridge: Optional[MQTTBridge] = None
 active_connections: List[WebSocket] = []
 sensor_history: List[Dict] = []
 MAX_HISTORY = 60  # Keep last 60 seconds
+
+
+def _get_sensor_source() -> str:
+    """Select sensor source: 'simulator' (default) or 'mqtt'."""
+    return os.getenv("SENSOR_SOURCE", "simulator").strip().lower()
+
+
+def _get_latest_sensor_reading() -> Optional[Dict]:
+    source = _get_sensor_source()
+    if source == "mqtt" and mq_bridge:
+        return mq_bridge.latest()
+    if pump_simulator:
+        return pump_simulator.get_sensor_reading()
+    return None
 
 
 # Pydantic models for API
@@ -46,14 +62,25 @@ class DiagnosticRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize resources on startup"""
-    global pump_simulator, ai_agent
+    global pump_simulator, ai_agent, mq_bridge
     
     print("\n" + "="*60)
     print("🚀 Starting Digital Twin Backend Server")
     print("="*60 + "\n")
     
-    # Initialize simulator
+    # Initialize simulator (kept for fallback and local-only mode)
     pump_simulator = PumpSimulator()
+
+    # Initialize MQTT bridge if enabled
+    if _get_sensor_source() == "mqtt":
+        try:
+            mq_bridge = MQTTBridge(load_mqtt_config_from_env(), max_history=MAX_HISTORY)
+            mq_bridge.start()
+            print("📡 MQTT sensor source enabled")
+        except Exception as e:
+            mq_bridge = None
+            print(f"⚠️ MQTT bridge initialization failed: {e}")
+            print("   Falling back to simulator sensor source")
     
     # Initialize AI agent (may take a few seconds for embeddings)
     try:
@@ -69,6 +96,11 @@ async def lifespan(app: FastAPI):
     
     # Cleanup
     print("\n🛑 Shutting down Digital Twin Backend...")
+    if mq_bridge:
+        try:
+            mq_bridge.stop()
+        except Exception:
+            pass
 
 
 # Create FastAPI app
@@ -107,22 +139,35 @@ async def root():
 @app.get("/api/sensor-data")
 async def get_sensor_data():
     """Get current sensor readings"""
-    if pump_simulator is None:
-        raise HTTPException(status_code=503, detail="Simulator not initialized")
-    
-    reading = pump_simulator.get_sensor_reading()
+    reading = _get_latest_sensor_reading()
+    if reading is None:
+        raise HTTPException(status_code=503, detail="Sensor source not available")
     return reading
 
 
 @app.get("/api/sensor-history")
 async def get_sensor_history():
     """Get historical sensor data (last 60 readings)"""
+    if _get_sensor_source() == "mqtt" and mq_bridge:
+        return {"history": mq_bridge.history()}
     return {"history": sensor_history}
 
 
 @app.post("/api/inject-fault")
 async def inject_fault(request: FaultRequest):
     """Inject a fault condition into the simulator"""
+    # In MQTT mode, publish a command to the external simulator.
+    if _get_sensor_source() == "mqtt":
+        if mq_bridge is None:
+            raise HTTPException(status_code=503, detail="MQTT bridge not initialized")
+        fault_id = request.fault_type.upper().strip()
+        if fault_id == "NORMAL":
+            mq_bridge.publish_command("RESET")
+        else:
+            mq_bridge.publish_command("INJECT_FAULT", fault_type=fault_id)
+        return {"status": "success", "message": f"Command sent via MQTT: {fault_id}"}
+
+    # Simulator mode
     if pump_simulator is None:
         raise HTTPException(status_code=503, detail="Simulator not initialized")
     
@@ -156,9 +201,13 @@ async def emergency_stop():
     Emergency stop - immediately reset pump to normal operation.
     Called automatically when critical conditions are detected.
     """
+    if _get_sensor_source() == "mqtt" and mq_bridge:
+        mq_bridge.publish_command("EMERGENCY_STOP")
+
     if pump_simulator is None:
         raise HTTPException(status_code=503, detail="Pump simulator not initialized")
-    
+
+    # Keep local simulator safe as well
     pump_simulator.reset_fault()
     return {
         "status": "success",
@@ -210,8 +259,8 @@ async def chat(request: ChatRequest):
     
     try:
         sensor_data = None
-        if request.include_sensor_context and pump_simulator:
-            sensor_data = pump_simulator.get_sensor_reading()
+        if request.include_sensor_context:
+            sensor_data = _get_latest_sensor_reading()
         
         response = ai_agent.ask_question(request.message, sensor_data)
         return {
@@ -253,20 +302,18 @@ async def websocket_sensor_stream(websocket: WebSocket):
     
     try:
         while True:
-            if pump_simulator:
-                # Get current reading
-                reading = pump_simulator.get_sensor_reading()
-                
-                # Add to history
-                sensor_history.append(reading)
-                if len(sensor_history) > MAX_HISTORY:
-                    sensor_history.pop(0)
-                
-                # Send to client
+            reading = _get_latest_sensor_reading()
+            if reading:
+                # Add to history (simulator mode only; MQTT keeps its own)
+                if _get_sensor_source() != "mqtt":
+                    sensor_history.append(reading)
+                    if len(sensor_history) > MAX_HISTORY:
+                        sensor_history.pop(0)
+
                 await websocket.send_json({
                     "type": "sensor_update",
                     "data": reading,
-                    "history_length": len(sensor_history)
+                    "history_length": len(sensor_history) if _get_sensor_source() != "mqtt" else (len(mq_bridge.history()) if mq_bridge else 0)
                 })
             
             await asyncio.sleep(1)  # 1 Hz update rate
@@ -287,8 +334,8 @@ async def websocket_diagnostic_stream(websocket: WebSocket):
     
     try:
         while True:
-            if pump_simulator:
-                reading = pump_simulator.get_sensor_reading()
+            reading = _get_latest_sensor_reading()
+            if reading:
                 current_fault = reading.get("fault_state", "Normal")
                 
                 # Check if fault state changed
