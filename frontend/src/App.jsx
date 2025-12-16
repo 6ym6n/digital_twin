@@ -1530,7 +1530,7 @@ function App() {
 
       {/* Footer */}
       <footer className="mt-8 text-center text-slate-500 text-sm">
-        <p>Digital Twin v1.0 • RAG-Enhanced Predictive Maintenance • Powered by Gemini 2.5</p>
+        <p>Digital Twin v1.0 • RAG-Enhanced Predictive Maintenance</p>
       </footer>
     </div>
   )
