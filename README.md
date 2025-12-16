@@ -415,6 +415,18 @@ answer = agent.ask_question(
 # Returns context-aware answer with manual references
 ```
 
+**C. Long-Term Semantic Memory (Facts & Preferences) ✅**
+
+The chatbot can store small "memory notes" (facts, preferences, constraints) in a dedicated ChromaDB collection and retrieve them later.
+
+- Add a memory note:
+    - `POST /api/memory` with JSON: `{ "text": "User prefers French answers", "tag": "preference" }`
+- Search memory notes:
+    - `GET /api/memory/search?query=...&k=5`
+- Quick shortcut inside chat:
+    - Send a message starting with `remember:` (or `mémorise:`) and the backend will store it.
+        - Example: `remember: Always answer in French`
+
 **Integration Flow:**
 ```
 Sensor Data → AI Agent → RAG Query → Vector Search → Context Retrieval

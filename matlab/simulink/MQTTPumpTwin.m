@@ -194,12 +194,18 @@ classdef MQTTPumpTwin < matlab.System
                     vibrationT = obj.NominalVibration + 1.5 + double(dur) * 0.1 + MQTTPumpTwin.randUniform(-0.3, 0.5);
                     temperatureT = obj.NominalTemperature + 5 + MQTTPumpTwin.randUniform(0, 3);
                 case 'OVERLOAD'
-                    aT = aT * MQTTPumpTwin.randUniform(1.15, 1.30);
-                    bT = bT * MQTTPumpTwin.randUniform(1.15, 1.30);
-                    cT = cT * MQTTPumpTwin.randUniform(1.15, 1.30);
-                    voltageT = obj.NominalVoltage * MQTTPumpTwin.randUniform(0.95, 0.98);
-                    pressureT = obj.NominalPressure * MQTTPumpTwin.randUniform(1.1, 1.3);
-                    temperatureT = obj.NominalTemperature + 10 + MQTTPumpTwin.randUniform(0, 5);
+                    % Overload: sustained high current + heating, mild voltage sag, slight vib increase.
+                    overFactor = 1.15 + min(double(dur) * 0.01, 0.25); % up to ~1.40
+                    aT = aT * MQTTPumpTwin.randUniform(overFactor - 0.03, overFactor + 0.05);
+                    bT = bT * MQTTPumpTwin.randUniform(overFactor - 0.03, overFactor + 0.05);
+                    cT = cT * MQTTPumpTwin.randUniform(overFactor - 0.03, overFactor + 0.05);
+
+                    sag = 0.98 - min(double(dur) * 0.0005, 0.04); % down to ~0.94
+                    voltageT = obj.NominalVoltage * MQTTPumpTwin.randUniform(max(0.92, sag - 0.02), min(0.98, sag + 0.01));
+
+                    pressureT = obj.NominalPressure * MQTTPumpTwin.randUniform(1.05, 1.20);
+                    vibrationT = obj.NominalVibration + 0.3 + min(double(dur) * 0.03, 2.0) + MQTTPumpTwin.randUniform(-0.2, 0.3);
+                    temperatureT = obj.NominalTemperature + 10 + min(double(dur) * 0.5, 35) + MQTTPumpTwin.randUniform(-1.0, 2.0);
                 otherwise
                     % NORMAL
             end
@@ -508,6 +514,10 @@ classdef MQTTPumpTwin < matlab.System
                         obj.FaultState = char(f);
                         obj.FaultStartEpoch = MQTTPumpTwin.epochSeconds();
                     end
+
+                    % Clear previous setpoints unless explicitly provided in this command.
+                    obj.TemperatureSetpoint = NaN;
+                    obj.TemperatureBand = 2.0;
 
                     if isfield(cmdObj, 'temperature_target')
                         try

@@ -84,7 +84,8 @@ Your responsibilities:
 
 Communication style:
 - Use technical terminology but remain clear
-- Structure responses: DIAGNOSIS → ROOT CAUSE → ACTION ITEMS
+- For full diagnosis reports, structure responses: DIAGNOSIS → ROOT CAUSE → ACTION ITEMS
+- For chat Q&A, answer the user's question directly without repeating a full report unless asked
 - Reference specific manual pages when applicable
 - If unsure, recommend additional measurements rather than guessing
 - For emergencies (extreme values), recommend immediate shutdown
@@ -490,7 +491,13 @@ Keep your response under 300 words for dashboard display."""
         
         return "\n\n".join(context_parts)
     
-    def ask_question(self, question: str, sensor_data: Optional[Dict] = None) -> str:
+    def ask_question(
+        self,
+        question: str,
+        sensor_data: Optional[Dict] = None,
+        fault_context: Optional[Dict] = None,
+        chat_history: Optional[List[Dict[str, str]]] = None,
+    ) -> str:
         """
         Chat mode - answer user questions about maintenance.
         
@@ -502,6 +509,21 @@ Keep your response under 300 words for dashboard display."""
             AI response text
         """
         print(f"\n💬 User Question: {question}")
+
+        # Session-only memory: keep a small rolling chat history in the prompt.
+        history_text = ""
+        if chat_history and isinstance(chat_history, list):
+            # Keep only last 8 messages to avoid bloating the prompt.
+            trimmed = chat_history[-8:]
+            lines = []
+            for m in trimmed:
+                role = (m.get("role") or "").strip().lower()
+                content = (m.get("content") or "").strip()
+                if not content:
+                    continue
+                label = "User" if role == "user" else "Assistant"
+                lines.append(f"{label}: {content}")
+            history_text = "\n".join(lines).strip()
         
         # Retrieve relevant documentation
         print("📚 Searching knowledge base...")
@@ -510,19 +532,60 @@ Keep your response under 300 words for dashboard display."""
         
         # Build prompt
         sensor_context = ""
+        shutdown_context = ""
+        fault_start_context = ""
         if sensor_data:
             sensor_context = f"\n\nCURRENT PUMP STATUS:\n{self._format_sensor_data(sensor_data)}"
+            try:
+                shutdown = self._evaluate_shutdown_decision(sensor_data)
+                shutdown_context = (
+                    "\n\nSAFETY EVALUATION (computed from thresholds):\n"
+                    f"- action: {shutdown.get('action')}\n"
+                    f"- urgency: {shutdown.get('urgency')}\n"
+                    f"- message: {shutdown.get('message_en') or shutdown.get('message') or ''}"
+                )
+            except Exception:
+                shutdown_context = ""
+
+        if fault_context and isinstance(fault_context, dict):
+            start_snapshot = fault_context.get("fault_start_snapshot")
+            start_seen_at = fault_context.get("fault_start_seen_at")
+            start_estimated_at = fault_context.get("fault_start_estimated_at")
+            start_fault_state = fault_context.get("fault_state")
+            if start_snapshot and isinstance(start_snapshot, dict):
+                when = start_estimated_at or start_seen_at
+                when_line = f"Timestamp: {when}" if when else "Timestamp: unknown"
+                fault_line = f"Fault: {start_fault_state}" if start_fault_state else "Fault: unknown"
+                fault_start_context = (
+                    "\n\nFAULT START SNAPSHOT (captured by backend):\n"
+                    f"{fault_line}\n"
+                    f"{when_line}\n"
+                    f"{self._format_sensor_data(start_snapshot)}"
+                )
         
         prompt = f"""{self.system_prompt}
 
-{sensor_context}
+    CHAT MODE INSTRUCTIONS (must follow):
+    - Reply in the same language as the user's question.
+    - Give a DIRECT answer to the user's question (what to do / how to fix).
+    - Do NOT output headings like: DIAGNOSIS, ROOT CAUSE, ACTION ITEMS, VERIFICATION STEPS.
+    - Keep it short: 4–8 bullet points maximum.
+    - If the safety evaluation indicates IMMEDIATE_SHUTDOWN, the first bullet must say to stop immediately.
+    - Only include the 1–2 most relevant verification checks.
+    - If the user asks about the *beginning* of the fault (e.g. "au début"), use the FAULT START SNAPSHOT if provided.
+    - If no start snapshot is provided, say you don't have it and give the closest available info.
+    - Use CHAT HISTORY if it helps keep context within this session.
 
-DOCUMENTATION CONTEXT:
-{context}
+    {sensor_context}{shutdown_context}{fault_start_context}
 
-USER QUESTION: {question}
+    CHAT HISTORY (this session, most recent):
+    {history_text if history_text else "(none)"}
 
-Provide a clear, actionable answer based on the manual and current pump status (if available)."""
+    DOCUMENTATION CONTEXT:
+    {context}
+
+    USER QUESTION: {question}
+    """
         
         # Get response
         print("🤖 Generating response...")
@@ -531,6 +594,7 @@ Provide a clear, actionable answer based on the manual and current pump status (
             response = self.llm.invoke(messages)
             
             response_text = response.content if response.content else "No response generated."
+            response_text = self._postprocess_chat_response(question, response_text)
             
             if not response.content:
                 print("⚠️  Warning: Empty response from model")
@@ -540,6 +604,80 @@ Provide a clear, actionable answer based on the manual and current pump status (
         
         print("✅ Response generated!\n")
         return response_text
+
+    def _postprocess_chat_response(self, question: str, response_text: str) -> str:
+        value = (response_text or "").strip()
+        if not value:
+            return ""
+
+        upper = value.upper()
+        has_report_headers = any(
+            key in upper
+            for key in ("DIAGNOSIS", "ROOT CAUSE", "ACTION ITEMS", "IMMEDIATE ACTIONS", "VERIFICATION STEPS")
+        )
+        if not has_report_headers:
+            return value
+
+        # Extract the ACTION ITEMS / IMMEDIATE ACTIONS section if present.
+        lines = value.splitlines()
+        header_regex = r"^(?:#+\s*)?(?:\*\*)?\s*(DIAGNOSIS|ROOT\s*CAUSE|ACTION\s*ITEMS?|IMMEDIATE\s*ACTIONS?|VERIFICATION\s*STEPS?|RECOMMENDATION)\s*(?:\*\*)?\s*:?.*$"
+
+        section = None
+        sections = {
+            "action": [],
+            "verification": [],
+            "other": [],
+        }
+
+        import re
+
+        for raw in lines:
+            line = str(raw).rstrip()
+            m = re.match(header_regex, line.strip(), flags=re.IGNORECASE)
+            if m:
+                key = m.group(1).strip().upper()
+                if "ACTION" in key:
+                    section = "action"
+                elif "VERIFICATION" in key:
+                    section = "verification"
+                else:
+                    section = "other"
+                continue
+
+            if section is None:
+                continue
+            sections[section].append(line)
+
+        def extract_bullets(section_lines):
+            text = "\n".join(section_lines)
+            out = []
+            for raw_line in text.splitlines():
+                s = raw_line.strip()
+                if not s:
+                    continue
+                s = re.sub(r"^\s*(?:\d+\.|\-|\*|•)\s+", "", s)
+                if s:
+                    out.append(s)
+            return out
+
+        action = extract_bullets(sections["action"])[:8]
+        verification = extract_bullets(sections["verification"])[:2]
+
+        # If we couldn't extract anything, return the original.
+        if not action and not verification:
+            return value
+
+        q_upper = (question or "").upper()
+        french = any(tok in q_upper for tok in ("QUE ", "QU'", "QUOI", "COMMENT", "POURQUOI", "RÉGLER", "REGLER"))
+        title = "À faire maintenant:" if french else "What to do now:"
+
+        parts = [title]
+        for item in action:
+            parts.append(f"- {item}")
+        for item in verification:
+            parts.append(f"- {item}")
+
+        return "\n".join(parts).strip()
 
 
 # Testing and demonstration

@@ -176,6 +176,123 @@ function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onE
   
   const style = getShutdownStyle()
 
+  const renderInlineBold = (text) => {
+    if (!text || typeof text !== 'string' || !text.includes('**')) return text
+
+    const parts = []
+    const regex = /\*\*(.+?)\*\*/g
+    let lastIndex = 0
+    let match
+    let keyIndex = 0
+
+    while ((match = regex.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        parts.push(<span key={`t-${keyIndex++}`}>{text.slice(lastIndex, match.index)}</span>)
+      }
+      parts.push(
+        <span key={`b-${keyIndex++}`} className="font-semibold text-slate-100">
+          {match[1]}
+        </span>
+      )
+      lastIndex = match.index + match[0].length
+    }
+
+    if (lastIndex < text.length) {
+      parts.push(<span key={`t-${keyIndex++}`}>{text.slice(lastIndex)}</span>)
+    }
+
+    return parts
+  }
+
+  const parseDiagnosisText = (text) => {
+    const input = (text || '').replace(/\r\n/g, '\n').trim()
+    if (!input) return null
+
+    const lines = input.split('\n')
+    const sections = {
+      diagnosis: [],
+      rootCause: [],
+      actionItems: [],
+      verificationSteps: [],
+      recommendation: []
+    }
+
+    const normalizeHeaderKey = (raw) => {
+      const upper = String(raw || '').toUpperCase().replace(/\s+/g, ' ').trim()
+      if (upper === 'DIAGNOSIS') return 'diagnosis'
+      if (upper === 'ROOT CAUSE') return 'rootCause'
+      if (upper === 'ACTION ITEM' || upper === 'ACTION ITEMS') return 'actionItems'
+      if (upper === 'VERIFICATION STEP' || upper === 'VERIFICATION STEPS') return 'verificationSteps'
+      if (upper === 'RECOMMENDATION') return 'recommendation'
+      return null
+    }
+
+    const headerRegex = /^(?:#+\s*)?(?:\*\*)?\s*(DIAGNOSIS|ROOT\s*CAUSE|ACTION\s*ITEMS?|VERIFICATION\s*STEPS?|RECOMMENDATION)\s*(?:\*\*)?\s*:?\s*$/i
+
+    let currentKey = 'diagnosis'
+    for (const rawLine of lines) {
+      const line = rawLine ?? ''
+      const trimmed = String(line).trim()
+      const headerMatch = trimmed.match(headerRegex)
+
+      if (headerMatch) {
+        const key = normalizeHeaderKey(headerMatch[1])
+        if (key) currentKey = key
+        continue
+      }
+
+      sections[currentKey].push(line)
+    }
+
+    const toText = (arr) => arr.join('\n').trim()
+    const extractBullets = (raw) => {
+      const items = []
+      for (const ln of raw.split('\n')) {
+        const m = ln.match(/^\s*(?:[-*•]|\d+[.)])\s+(.+?)\s*$/)
+        if (m) items.push(m[1])
+      }
+      return items
+    }
+
+    const diagnosisText = toText(sections.diagnosis)
+    const rootCauseText = toText(sections.rootCause)
+    const recommendationText = toText(sections.recommendation)
+
+    const actionRaw = toText(sections.actionItems)
+    const verificationRaw = toText(sections.verificationSteps)
+    const actionItems = actionRaw ? extractBullets(actionRaw) : []
+    const verificationSteps = verificationRaw ? extractBullets(verificationRaw) : []
+
+    const hasStructured = Boolean(rootCauseText || recommendationText || actionItems.length || verificationSteps.length)
+
+    return {
+      diagnosisText,
+      rootCauseText,
+      recommendationText,
+      actionItems,
+      verificationSteps,
+      fallbackText: input,
+      hasStructured
+    }
+  }
+
+  const parsedDiagnosis = diagnosis ? parseDiagnosisText(diagnosis) : null
+
+  const renderParagraphs = (text) => {
+    const value = (text || '').trim()
+    if (!value) return null
+    const paragraphs = value.split(/\n\s*\n/g)
+    return (
+      <div className="space-y-2">
+        {paragraphs.map((p, idx) => (
+          <p key={idx} className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">
+            {renderInlineBold(p)}
+          </p>
+        ))}
+      </div>
+    )
+  }
+
   return (
     <div className="glass rounded-xl p-4">
       <div className="flex items-center justify-between mb-3">
@@ -294,8 +411,61 @@ function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onE
             <span>Analyzing sensor data...</span>
           </div>
         ) : diagnosis ? (
-          <div className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap slide-in">
-            {diagnosis}
+          <div className="slide-in space-y-3">
+            {parsedDiagnosis?.hasStructured ? (
+              <>
+                {parsedDiagnosis.diagnosisText && (
+                  <div className="rounded-lg border border-slate-700/50 bg-slate-900/30 p-3">
+                    <div className="text-xs font-semibold text-cyan-300 mb-2">Diagnosis</div>
+                    {renderParagraphs(parsedDiagnosis.diagnosisText)}
+                  </div>
+                )}
+
+                {parsedDiagnosis.rootCauseText && (
+                  <div className="rounded-lg border border-slate-700/50 bg-slate-900/30 p-3">
+                    <div className="text-xs font-semibold text-purple-300 mb-2">Root cause</div>
+                    {renderParagraphs(parsedDiagnosis.rootCauseText)}
+                  </div>
+                )}
+
+                {parsedDiagnosis.actionItems?.length > 0 && (
+                  <div className="rounded-lg border border-slate-700/50 bg-slate-900/30 p-3">
+                    <div className="text-xs font-semibold text-amber-300 mb-2">Action items</div>
+                    <ol className="list-decimal ml-5 space-y-1 text-slate-300 text-sm">
+                      {parsedDiagnosis.actionItems.map((item, idx) => (
+                        <li key={idx} className="leading-relaxed">
+                          {renderInlineBold(item)}
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+
+                {parsedDiagnosis.verificationSteps?.length > 0 && (
+                  <div className="rounded-lg border border-slate-700/50 bg-slate-900/30 p-3">
+                    <div className="text-xs font-semibold text-slate-200 mb-2">Verification</div>
+                    <ul className="list-disc ml-5 space-y-1 text-slate-300 text-sm">
+                      {parsedDiagnosis.verificationSteps.map((item, idx) => (
+                        <li key={idx} className="leading-relaxed">
+                          {renderInlineBold(item)}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {parsedDiagnosis.recommendationText && (
+                  <div className="rounded-lg border border-slate-700/50 bg-slate-900/30 p-3">
+                    <div className="text-xs font-semibold text-green-300 mb-2">Recommendation</div>
+                    {renderParagraphs(parsedDiagnosis.recommendationText)}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">
+                {renderInlineBold(parsedDiagnosis?.fallbackText || diagnosis)}
+              </div>
+            )}
           </div>
         ) : (
           <div className="text-slate-500 text-sm italic">
@@ -357,6 +527,81 @@ function FloatingChatbox({ messages, onSendMessage, isLoading }) {
     "Explain bearing wear symptoms",
     "Maintenance schedule?"
   ]
+
+  const renderInlineBold = (text) => {
+    if (!text || typeof text !== 'string' || !text.includes('**')) return text
+
+    const parts = []
+    const regex = /\*\*(.+?)\*\*/g
+    let lastIndex = 0
+    let match
+    let keyIndex = 0
+
+    while ((match = regex.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        parts.push(<span key={`t-${keyIndex++}`}>{text.slice(lastIndex, match.index)}</span>)
+      }
+      parts.push(
+        <span key={`b-${keyIndex++}`} className="font-semibold text-slate-100">
+          {match[1]}
+        </span>
+      )
+      lastIndex = match.index + match[0].length
+    }
+
+    if (lastIndex < text.length) {
+      parts.push(<span key={`t-${keyIndex++}`}>{text.slice(lastIndex)}</span>)
+    }
+
+    return parts
+  }
+
+  const renderChatContent = (content) => {
+    const text = String(content || '').replace(/\r\n/g, '\n').trim()
+    if (!text) return null
+
+    const blocks = text.split(/\n\s*\n/g)
+
+    return (
+      <div className="space-y-2">
+        {blocks.map((block, blockIdx) => {
+          const lines = block.split('\n').filter(l => l.trim().length > 0)
+
+          const isOrdered = lines.length > 0 && lines.every(l => /^\s*\d+\.\s+/.test(l))
+          if (isOrdered) {
+            return (
+              <ol key={blockIdx} className="list-decimal ml-5 space-y-1">
+                {lines.map((l, idx) => (
+                  <li key={idx} className="text-sm leading-relaxed break-words">
+                    {renderInlineBold(l.replace(/^\s*\d+\.\s+/, ''))}
+                  </li>
+                ))}
+              </ol>
+            )
+          }
+
+          const isUnordered = lines.length > 0 && lines.every(l => /^\s*[-*•]\s+/.test(l))
+          if (isUnordered) {
+            return (
+              <ul key={blockIdx} className="list-disc ml-5 space-y-1">
+                {lines.map((l, idx) => (
+                  <li key={idx} className="text-sm leading-relaxed break-words">
+                    {renderInlineBold(l.replace(/^\s*[-*•]\s+/, ''))}
+                  </li>
+                ))}
+              </ul>
+            )
+          }
+
+          return (
+            <p key={blockIdx} className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+              {renderInlineBold(block)}
+            </p>
+          )
+        })}
+      </div>
+    )
+  }
 
   return (
     <>
@@ -481,7 +726,15 @@ function FloatingChatbox({ messages, onSendMessage, isLoading }) {
                               : 'bg-slate-800/80 text-slate-200 border border-slate-700/50'
                           }`}
                         >
-                          <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                          {msg.role === 'assistant' ? (
+                            <div className="text-slate-200">
+                              {renderChatContent(msg.content)}
+                            </div>
+                          ) : (
+                            <p className="text-sm whitespace-pre-wrap leading-relaxed break-words">
+                              {msg.content}
+                            </p>
+                          )}
                         </div>
                         {msg.role === 'user' && (
                           <div className="w-8 h-8 rounded-full bg-slate-700 
@@ -563,18 +816,25 @@ function LiveChart({ data, activeFault }) {
   )
   const imbalance = latestData?.amperage?.imbalance_pct || 0
 
-  const hasWarning = imbalance > 5 || activeFault !== 'NORMAL'
+  const hasImbalance = imbalance > 5
+  const hasFault = activeFault !== 'NORMAL'
+  const hasWarning = hasImbalance || hasFault
 
   return (
     <div className={`glass rounded-xl p-4 transition-all duration-300 ${hasWarning ? 'ring-2 ring-amber-500/50' : ''}`}>
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           <Activity className="w-5 h-5 text-cyan-400" />
-          <h3 className="font-semibold text-white">⚡ Three-Phase Current Monitoring (Last 60s)</h3>
+          <div>
+            <h3 className="font-semibold text-white">⚡ Three-Phase Current Monitoring (Last 60s)</h3>
+            <div className="text-xs text-slate-400 mt-1">
+              Plage OK: imbalance &lt; 5% • Référence: 10A • Surcharge: &gt; 11.5A
+            </div>
+          </div>
         </div>
         {hasWarning && (
           <span className="px-2 py-1 rounded-full bg-amber-500/20 text-amber-400 text-xs font-medium">
-            ⚠️ Imbalance Detected
+            {hasImbalance ? '⚠️ Imbalance Detected' : '⚠️ Fault Active'}
           </span>
         )}
       </div>
@@ -705,7 +965,10 @@ function MultiSensorChart({ data }) {
       <div className="grid grid-cols-2 gap-4">
         {/* Voltage Chart */}
         <div className="bg-slate-800/50 rounded-lg p-3">
-          <div className="text-xs text-slate-400 mb-2">🔌 Voltage (V)</div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-xs text-slate-400">🔌 Voltage (V)</div>
+            <div className="text-[11px] text-green-400">Plage OK: 220–240V (limite 210–250)</div>
+          </div>
           <div className="h-32">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={chartData}>
@@ -717,12 +980,14 @@ function MultiSensorChart({ data }) {
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(100, 116, 139, 0.15)" />
                 <XAxis dataKey="time" hide />
-                <YAxis domain={[350, 450]} tick={{ fill: '#94a3b8', fontSize: 10 }} width={35} />
+                <YAxis domain={[180, 260]} tick={{ fill: '#94a3b8', fontSize: 10 }} width={35} />
                 <Tooltip
                   contentStyle={{ backgroundColor: 'rgba(30, 41, 59, 0.95)', border: '1px solid rgba(100, 116, 139, 0.3)', borderRadius: '6px' }}
                   formatter={(v) => [`${v.toFixed(1)} V`, 'Voltage']}
                 />
-                <ReferenceLine y={400} stroke="#64748b" strokeDasharray="3 3" />
+                <ReferenceLine y={220} stroke="#64748b" strokeDasharray="3 3" />
+                <ReferenceLine y={240} stroke="#64748b" strokeDasharray="3 3" />
+                <ReferenceLine y={230} stroke="#64748b" strokeDasharray="3 3" />
                 <Area type="monotone" dataKey="voltage" stroke="#a855f7" strokeWidth={2} fill="url(#voltageGrad)" dot={false} />
               </AreaChart>
             </ResponsiveContainer>
@@ -731,7 +996,10 @@ function MultiSensorChart({ data }) {
 
         {/* Vibration Chart */}
         <div className="bg-slate-800/50 rounded-lg p-3">
-          <div className="text-xs text-slate-400 mb-2">📊 Vibration (mm/s)</div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-xs text-slate-400">📊 Vibration (mm/s)</div>
+            <div className="text-[11px] text-green-400">Plage OK: ≤ 5 (limite 8)</div>
+          </div>
           <div className="h-32">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={chartData}>
@@ -749,7 +1017,8 @@ function MultiSensorChart({ data }) {
                   formatter={(v) => [`${v.toFixed(2)} mm/s`, 'Vibration']}
                 />
                 <ReferenceArea y1={5} y2={15} fill="rgba(239, 68, 68, 0.1)" />
-                <ReferenceLine y={5} stroke="#ef4444" strokeDasharray="3 3" />
+                <ReferenceLine y={5} stroke="#64748b" strokeDasharray="3 3" />
+                <ReferenceLine y={8} stroke="#ef4444" strokeDasharray="3 3" />
                 <Area type="monotone" dataKey="vibration" stroke="#f59e0b" strokeWidth={2} fill="url(#vibrationGrad)" dot={false} />
               </AreaChart>
             </ResponsiveContainer>
@@ -758,7 +1027,10 @@ function MultiSensorChart({ data }) {
 
         {/* Pressure Chart */}
         <div className="bg-slate-800/50 rounded-lg p-3">
-          <div className="text-xs text-slate-400 mb-2">💨 Pressure (bar)</div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-xs text-slate-400">💨 Pressure (bar)</div>
+            <div className="text-[11px] text-green-400">Plage OK: 3–6 bar (limite 2–7)</div>
+          </div>
           <div className="h-32">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={chartData}>
@@ -775,6 +1047,8 @@ function MultiSensorChart({ data }) {
                   contentStyle={{ backgroundColor: 'rgba(30, 41, 59, 0.95)', border: '1px solid rgba(100, 116, 139, 0.3)', borderRadius: '6px' }}
                   formatter={(v) => [`${v.toFixed(2)} bar`, 'Pressure']}
                 />
+                <ReferenceLine y={3} stroke="#64748b" strokeDasharray="3 3" />
+                <ReferenceLine y={6} stroke="#64748b" strokeDasharray="3 3" />
                 <Area type="monotone" dataKey="pressure" stroke="#14b8a6" strokeWidth={2} fill="url(#pressureGrad)" dot={false} />
               </AreaChart>
             </ResponsiveContainer>
@@ -783,7 +1057,10 @@ function MultiSensorChart({ data }) {
 
         {/* Temperature Chart */}
         <div className="bg-slate-800/50 rounded-lg p-3">
-          <div className="text-xs text-slate-400 mb-2">🌡️ Temperature (°C)</div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-xs text-slate-400">🌡️ Temperature (°C)</div>
+            <div className="text-[11px] text-green-400">Plage OK: ≤ 65°C (limite 80°C)</div>
+          </div>
           <div className="h-32">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={chartData}>
@@ -800,6 +1077,7 @@ function MultiSensorChart({ data }) {
                   contentStyle={{ backgroundColor: 'rgba(30, 41, 59, 0.95)', border: '1px solid rgba(100, 116, 139, 0.3)', borderRadius: '6px' }}
                   formatter={(v) => [`${v.toFixed(1)} °C`, 'Temperature']}
                 />
+                <ReferenceLine y={65} stroke="#64748b" strokeDasharray="3 3" />
                 <ReferenceArea y1={80} y2={100} fill="rgba(239, 68, 68, 0.15)" />
                 <ReferenceLine y={80} stroke="#ef4444" strokeDasharray="3 3" />
                 <Area type="monotone" dataKey="temperature" stroke="#ef4444" strokeWidth={2} fill="url(#tempGrad)" dot={false} />
@@ -831,6 +1109,25 @@ function App() {
   const wsRef = useRef(null)
   const sensorDataRef = useRef(null)  // Ref to always have latest sensor data
   const emergencyStopInProgressRef = useRef(false)
+
+  // Chat session id stored in the browser (enables session-only memory on backend)
+  const chatSessionIdRef = useRef(null)
+  if (chatSessionIdRef.current === null) {
+    try {
+      const existing = window.localStorage.getItem('dt_chat_session_id')
+      if (existing) {
+        chatSessionIdRef.current = existing
+      } else {
+        const newId = (window.crypto && window.crypto.randomUUID)
+          ? window.crypto.randomUUID()
+          : `dt_${Date.now()}_${Math.random().toString(16).slice(2)}`
+        window.localStorage.setItem('dt_chat_session_id', newId)
+        chatSessionIdRef.current = newId
+      }
+    } catch {
+      chatSessionIdRef.current = `dt_${Date.now()}_${Math.random().toString(16).slice(2)}`
+    }
+  }
 
   // Fetch fault types on mount
   useEffect(() => {
@@ -932,6 +1229,10 @@ function App() {
       if (response.ok) {
         setActiveFault('NORMAL')
 
+        // Clear any previous diagnosis/shutdown banner so the emergency button disappears.
+        setShutdownDecision(null)
+        setDiagnosis('')
+
         // Immediately reflect a stopped pump: zero-out sensor values in the UI.
         const zeroReading = {
           timestamp: new Date().toISOString(),
@@ -956,6 +1257,7 @@ function App() {
       }
     } catch (error) {
       console.error('Failed to execute emergency stop:', error)
+    } finally {
       emergencyStopInProgressRef.current = false
     }
   }
@@ -999,7 +1301,8 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           message, 
-          include_sensor_context: true 
+          include_sensor_context: true,
+          session_id: chatSessionIdRef.current,
         })
       })
       
@@ -1033,8 +1336,9 @@ function App() {
         if (sensorData.amperage?.imbalance_pct > 5) return 'warning'
         return 'normal'
       case 'voltage':
-        if (Math.abs(value - 400) > 20) return 'danger'
-        if (Math.abs(value - 400) > 10) return 'warning'
+        // Simulator publishes phase-to-neutral voltage (nominal ~230V)
+        if (Math.abs(value - 230) > 20) return 'danger'
+        if (Math.abs(value - 230) > 10) return 'warning'
         return 'normal'
       case 'vibration':
         if (value > 8) return 'danger'
@@ -1128,7 +1432,7 @@ function App() {
                 icon={Gauge}
                 status={getMetricStatus('voltage', sensorData?.voltage)}
                 sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.voltage || 0 }))}
-                threshold="Normal: 380-420V"
+                threshold="Plage OK: 220–240V (limite 210–250)"
               />
               <MetricCard
                 title="Vibration"
@@ -1137,7 +1441,7 @@ function App() {
                 icon={Activity}
                 status={getMetricStatus('vibration', sensorData?.vibration)}
                 sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.vibration || 0 }))}
-                threshold="Critical > 5 mm/s"
+                threshold="Plage OK: ≤ 5 (limite 8)"
               />
               <MetricCard
                 title="Pressure"
@@ -1146,7 +1450,7 @@ function App() {
                 icon={Droplets}
                 status={getMetricStatus('pressure', sensorData?.pressure)}
                 sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.pressure || 0 }))}
-                threshold="Normal: 3-6 bar"
+                threshold="Plage OK: 3–6 bar (limite 2–7)"
               />
               <MetricCard
                 title="Temperature"
@@ -1155,7 +1459,7 @@ function App() {
                 icon={Thermometer}
                 status={getMetricStatus('temperature', sensorData?.temperature)}
                 sparklineData={sensorHistory.slice(-30).map(d => ({ value: d.temperature || 0 }))}
-                threshold="Max: 80°C"
+                threshold="Plage OK: ≤ 65°C (limite 80°C)"
               />
               <MetricCard
                 title="Fault State"

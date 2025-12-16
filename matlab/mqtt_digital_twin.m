@@ -187,12 +187,18 @@ while true
             vibrationT = cfg.NominalVibration + 1.5 + double(dur) * 0.1 + randUniform(-0.3, 0.5);
             temperatureT = cfg.NominalTemperature + 5 + randUniform(0, 3);
         case 'OVERLOAD'
-            aT = aT * randUniform(1.15, 1.30);
-            bT = bT * randUniform(1.15, 1.30);
-            cT = cT * randUniform(1.15, 1.30);
-            voltageT = cfg.NominalVoltage * randUniform(0.95, 0.98);
-            pressureT = cfg.NominalPressure * randUniform(1.1, 1.3);
-            temperatureT = cfg.NominalTemperature + 10 + randUniform(0, 5);
+            % Overload: sustained high current + heating, mild voltage sag, slight vib increase.
+            overFactor = 1.15 + min(double(dur) * 0.01, 0.25); % up to ~1.40
+            aT = aT * randUniform(overFactor - 0.03, overFactor + 0.05);
+            bT = bT * randUniform(overFactor - 0.03, overFactor + 0.05);
+            cT = cT * randUniform(overFactor - 0.03, overFactor + 0.05);
+
+            sag = 0.98 - min(double(dur) * 0.0005, 0.04); % down to ~0.94
+            voltageT = cfg.NominalVoltage * randUniform(max(0.92, sag - 0.02), min(0.98, sag + 0.01));
+
+            pressureT = cfg.NominalPressure * randUniform(1.05, 1.20);
+            vibrationT = cfg.NominalVibration + 0.3 + min(double(dur) * 0.03, 2.0) + randUniform(-0.2, 0.3);
+            temperatureT = cfg.NominalTemperature + 10 + min(double(dur) * 0.5, 35) + randUniform(-1.0, 2.0);
         otherwise
             % NORMAL
     end
@@ -423,6 +429,10 @@ end
                     state.fault_state = char(f);
                     state.fault_start = ticNowSeconds();
                 end
+
+                % Clear previous setpoints unless explicitly provided in this command.
+                state.setpoints.temperature = NaN;
+                state.bands.temperature = 2.0;
 
                 % Optional setpoint controls (e.g. temperature_target=90, temperature_band=2)
                 if isfield(cmdObj, 'temperature_target')

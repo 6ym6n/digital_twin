@@ -7,8 +7,8 @@ import os
 import sys
 import json
 import asyncio
-from datetime import datetime
-from typing import Optional, List, Dict
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -32,6 +32,177 @@ active_connections: List[WebSocket] = []
 sensor_history: List[Dict] = []
 MAX_HISTORY = 60  # Keep last 60 seconds
 
+# Session-only chat memory (in-memory). This keeps context within a single chat session
+# without persisting anything to disk.
+CHAT_MAX_TURNS = 20  # user+assistant messages (rolling window)
+chat_sessions: Dict[str, List[Dict[str, str]]] = {}
+
+# Basic guardrail: keep chat focused on pump maintenance topics.
+# (A rules-based filter is simple, fast, and reliable for demos.)
+MAINTENANCE_KEYWORDS = (
+    # FR
+    "pompe",
+    "moteur",
+    "maintenance",
+    "diagnostic",
+    "défaut",
+    "defaut",
+    "capteur",
+    "tension",
+    "courant",
+    "déséquilibre",
+    "desequilibre",
+    "vibration",
+    "température",
+    "temperature",
+    "pression",
+    "cavitation",
+    "roulement",
+    "bobinage",
+    "surcharge",
+    "joint",
+    "hélice",
+    "helice",
+    "turbine",
+    "impeller",
+    # EN
+    "pump",
+    "motor",
+    "fault",
+    "sensor",
+    "voltage",
+    "current",
+    "imbalance",
+    "bearing",
+    "overload",
+    "seal",
+    # Project terms
+    "mqtt",
+    "simulink",
+    "matlab",
+)
+
+
+def _is_maintenance_question(text: str) -> bool:
+    msg = (text or "").strip().lower()
+    if not msg:
+        return False
+    return any(k in msg for k in MAINTENANCE_KEYWORDS)
+
+
+def _maintenance_refusal_message(text: str) -> str:
+    msg = (text or "").strip().lower()
+    english_markers = ("what", "how", "why", "please", "can you", "could you")
+    is_english = any(m in msg for m in english_markers)
+    if is_english:
+        return (
+            "I can only help with pump maintenance/diagnostics (sensors, faults, tests, actions). "
+            "Please rephrase your question in that context."
+        )
+    return (
+        "Je peux répondre uniquement aux questions liées à la maintenance/diagnostic de la pompe "
+        "(capteurs, défauts, tests, actions). Reformule ta question dans ce cadre."
+    )
+
+# Fault start snapshot tracking (for questions like: "what were sensors at the beginning?")
+MAX_FAULT_EVENTS = 20
+_last_fault_state_seen: Optional[str] = None
+fault_active_context: Optional[Dict[str, Any]] = None
+fault_event_history: List[Dict[str, Any]] = []
+
+
+def _normalize_fault_state(value: Any) -> str:
+    s = str(value or "Normal").strip()
+    # Some sources may use NORMAL; simulator uses "Normal"
+    if s.upper() == "NORMAL":
+        return "Normal"
+    return s
+
+
+def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        s = str(value).strip()
+        # Support trailing 'Z'
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _extract_fault_duration_seconds(reading: Dict[str, Any]) -> Optional[float]:
+    for key in ("fault_duration", "fault_duration_s", "fault_duration_sec"):
+        if key in reading:
+            try:
+                v = reading.get(key)
+                if v is None:
+                    continue
+                return float(v)
+            except Exception:
+                continue
+    return None
+
+
+def _track_fault_context(reading: Dict[str, Any]) -> None:
+    """Track fault transitions and store the first snapshot when a fault starts."""
+    global _last_fault_state_seen, fault_active_context, fault_event_history
+
+    current_fault = _normalize_fault_state(reading.get("fault_state", "Normal"))
+    prev_fault = _normalize_fault_state(_last_fault_state_seen)
+
+    # Initialize baseline
+    if _last_fault_state_seen is None:
+        _last_fault_state_seen = current_fault
+        if current_fault == "Normal":
+            fault_active_context = None
+        else:
+            # First observation is already a fault
+            prev_fault = "Normal"
+
+    # Only act on transitions
+    if current_fault != prev_fault:
+        now_iso = datetime.now().astimezone().isoformat()
+
+        if current_fault == "Normal":
+            fault_active_context = None
+        else:
+            ts = reading.get("timestamp")
+            ts_dt = _parse_iso_timestamp(ts)
+            dur_s = _extract_fault_duration_seconds(reading)
+            estimated_start_iso = None
+            if ts_dt and dur_s is not None:
+                try:
+                    estimated_start_iso = (ts_dt - timedelta(seconds=dur_s)).isoformat()
+                except Exception:
+                    estimated_start_iso = None
+
+            event = {
+                "fault_state": current_fault,
+                "fault_start_seen_at": now_iso,
+                "fault_start_estimated_at": estimated_start_iso,
+                "fault_start_snapshot": reading,
+            }
+            fault_active_context = event
+            fault_event_history.append(event)
+            if len(fault_event_history) > MAX_FAULT_EVENTS:
+                fault_event_history = fault_event_history[-MAX_FAULT_EVENTS:]
+
+    _last_fault_state_seen = current_fault
+
+
+def _get_fault_context_for_prompt() -> Optional[Dict[str, Any]]:
+    # Only send the active fault context to the LLM (keeps prompt small)
+    if not fault_active_context:
+        return None
+    return {
+        "fault_state": fault_active_context.get("fault_state"),
+        "fault_start_seen_at": fault_active_context.get("fault_start_seen_at"),
+        "fault_start_estimated_at": fault_active_context.get("fault_start_estimated_at"),
+        "fault_start_snapshot": fault_active_context.get("fault_start_snapshot"),
+    }
+
 
 def _get_sensor_source() -> str:
     """Select sensor source: 'simulator' (default) or 'mqtt'."""
@@ -41,9 +212,15 @@ def _get_sensor_source() -> str:
 def _get_latest_sensor_reading() -> Optional[Dict]:
     source = _get_sensor_source()
     if source == "mqtt" and mq_bridge:
-        return mq_bridge.latest()
+        reading = mq_bridge.latest()
+        if reading:
+            _track_fault_context(reading)
+        return reading
     if pump_simulator:
-        return pump_simulator.get_sensor_reading()
+        reading = pump_simulator.get_sensor_reading()
+        if reading:
+            _track_fault_context(reading)
+        return reading
     return None
 
 
@@ -57,6 +234,17 @@ class FaultRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     include_sensor_context: bool = True
+    # Session identifier generated by the frontend (stored in localStorage).
+    # Used to keep a short rolling chat history for context.
+    session_id: Optional[str] = None
+
+class MemoryAddRequest(BaseModel):
+    text: str
+    tag: Optional[str] = None
+    source: Optional[str] = None
+
+class MemorySearchResponse(BaseModel):
+    results: List[Dict[str, Any]]
 
 class DiagnosticRequest(BaseModel):
     sensor_data: Dict
@@ -269,8 +457,33 @@ async def chat(request: ChatRequest):
         sensor_data = None
         if request.include_sensor_context:
             sensor_data = _get_latest_sensor_reading()
-        
-        response = ai_agent.ask_question(request.message, sensor_data)
+
+        fault_context = _get_fault_context_for_prompt() if request.include_sensor_context else None
+
+        msg = (request.message or "").strip()
+
+        # Guardrail: refuse non-maintenance questions before calling the LLM.
+        if not _is_maintenance_question(msg):
+            return {
+                "response": _maintenance_refusal_message(msg),
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        # Session-only memory: keep a rolling window of chat messages.
+        sid = (request.session_id or "default").strip() or "default"
+        history = chat_sessions.get(sid, [])
+        history.append({"role": "user", "content": msg})
+        # Trim to last N messages
+        if len(history) > CHAT_MAX_TURNS:
+            history = history[-CHAT_MAX_TURNS:]
+
+        response = ai_agent.ask_question(msg, sensor_data, fault_context=fault_context, chat_history=history)
+
+        history.append({"role": "assistant", "content": response})
+        if len(history) > CHAT_MAX_TURNS:
+            history = history[-CHAT_MAX_TURNS:]
+        chat_sessions[sid] = history
+
         return {
             "response": response,
             "timestamp": datetime.now().isoformat()
@@ -291,6 +504,15 @@ async def get_fault_types():
             {"id": "BEARING_WEAR", "name": "Bearing Wear", "icon": "⚙️"},
             {"id": "OVERLOAD", "name": "Overload", "icon": "🔥"},
         ]
+    }
+
+
+@app.get("/api/fault-context")
+async def get_fault_context():
+    """Expose the last fault-start snapshot for debugging / UI use."""
+    return {
+        "active": _get_fault_context_for_prompt(),
+        "history": fault_event_history[-5:],
     }
 
 
