@@ -462,12 +462,12 @@ async def chat(request: ChatRequest):
 
         msg = (request.message or "").strip()
 
-        # Guardrail: refuse non-maintenance questions before calling the LLM.
-        if not _is_maintenance_question(msg):
-            return {
-                "response": _maintenance_refusal_message(msg),
-                "timestamp": datetime.now().isoformat(),
-            }
+        # Guardrail: DISABLED for now (was too strict)
+        # if not _is_maintenance_question(msg):
+        #     return {
+        #         "response": _maintenance_refusal_message(msg),
+        #         "timestamp": datetime.now().isoformat(),
+        #     }
 
         # Session-only memory: keep a rolling window of chat messages.
         sid = (request.session_id or "default").strip() or "default"
@@ -514,6 +514,40 @@ async def get_fault_context():
         "active": _get_fault_context_for_prompt(),
         "history": fault_event_history[-5:],
     }
+
+
+class LogigrammeRequest(BaseModel):
+    """Request model for logigramme generation"""
+    fault_type: str
+    diagnosis: Optional[str] = None
+
+
+@app.post("/api/logigramme")
+async def generate_logigramme(request: LogigrammeRequest):
+    """
+    Generate a dynamic logigramme (flowchart steps) for the technician.
+    Uses RAG + LLM to create context-aware troubleshooting steps.
+    """
+    if ai_agent is None:
+        raise HTTPException(status_code=503, detail="AI Agent not initialized")
+    
+    if not request.fault_type or request.fault_type.upper() == "NORMAL":
+        return {"steps": []}
+    
+    try:
+        # Get current sensor data for context
+        sensor_data = _get_latest_sensor_reading()
+        
+        # Generate logigramme steps using AI
+        steps = ai_agent.generate_logigramme(
+            fault_type=request.fault_type.upper(),
+            sensor_data=sensor_data,
+            diagnosis_text=request.diagnosis,
+        )
+        
+        return {"steps": steps}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =====================================================

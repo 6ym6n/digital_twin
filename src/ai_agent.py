@@ -605,6 +605,170 @@ Keep your response under 300 words for dashboard display."""
         print("✅ Response generated!\n")
         return response_text
 
+    def generate_logigramme(
+        self,
+        fault_type: str,
+        sensor_data: Optional[Dict] = None,
+        diagnosis_text: Optional[str] = None,
+    ) -> List[Dict[str, any]]:
+        """
+        Generate a dynamic logigramme (flowchart steps) for the technician.
+        Uses RAG to retrieve relevant manual sections and LLM to generate steps.
+        
+        Args:
+            fault_type: The current fault type (e.g., 'WINDING_DEFECT')
+            sensor_data: Optional current sensor readings
+            diagnosis_text: Optional diagnosis text for additional context
+        
+        Returns:
+            List of step dictionaries with id, label, icon, critical flag
+        """
+        print(f"\n📋 Generating logigramme for fault: {fault_type}")
+        
+        # Build RAG query based on fault type
+        fault_queries = {
+            "WINDING_DEFECT": "motor winding defect repair steps troubleshooting procedure",
+            "SUPPLY_FAULT": "voltage supply fault electrical troubleshooting procedure",
+            "CAVITATION": "pump cavitation repair steps NPSH troubleshooting procedure",
+            "BEARING_WEAR": "bearing wear replacement lubrication troubleshooting procedure",
+            "OVERLOAD": "motor overload protection troubleshooting procedure",
+        }
+        
+        rag_query = fault_queries.get(fault_type, f"{fault_type} troubleshooting repair procedure")
+        
+        # Retrieve relevant documentation
+        print("📚 Searching knowledge base for procedures...")
+        chunks = self.rag_engine.query_knowledge_base(rag_query, top_k=4)
+        context = self._format_context(chunks)
+        
+        # Build sensor context if available
+        sensor_context = ""
+        if sensor_data:
+            sensor_context = f"\n\nCURRENT SENSOR READINGS:\n{self._format_sensor_data(sensor_data)}"
+        
+        # Build diagnosis context
+        diagnosis_context = ""
+        if diagnosis_text:
+            diagnosis_context = f"\n\nAI DIAGNOSIS:\n{diagnosis_text[:500]}..."
+        
+        # Prompt for generating structured steps
+        prompt = f"""You are a Senior Maintenance Engineer creating a step-by-step troubleshooting flowchart for a technician.
+
+FAULT TYPE: {fault_type.replace('_', ' ')}
+{sensor_context}
+{diagnosis_context}
+
+RELEVANT DOCUMENTATION FROM GRUNDFOS MANUAL:
+{context}
+
+TASK: Generate 5-7 actionable steps for the technician to diagnose and fix this fault.
+
+RULES:
+- Each step must be a single clear action (start with a verb)
+- Mark steps that are CRITICAL for safety with [CRITICAL] prefix
+- Steps should follow logical order: safety first, then diagnosis, then repair
+- Reference specific tools, measurements, or thresholds from the manual when possible
+- Keep each step under 10 words
+- Use English only
+
+FORMAT: Return ONLY a numbered list like this:
+1. [CRITICAL] Cut power supply immediately
+2. Check motor temperature with thermometer
+3. Measure winding resistance with multimeter
+...
+
+Do not add any introduction or conclusion. Just the numbered list."""
+        
+        # Get LLM response
+        print("🤖 Generating steps...")
+        try:
+            messages = [HumanMessage(content=prompt)]
+            response = self.llm.invoke(messages)
+            response_text = response.content if response.content else ""
+        except Exception as e:
+            print(f"❌ Error generating logigramme: {str(e)}")
+            return self._get_fallback_logigramme(fault_type)
+        
+        # Parse the response into structured steps
+        steps = self._parse_logigramme_response(response_text)
+        
+        if not steps:
+            print("⚠️ No steps parsed, using fallback")
+            return self._get_fallback_logigramme(fault_type)
+        
+        print(f"✅ Generated {len(steps)} steps\n")
+        return steps
+    
+    def _parse_logigramme_response(self, response_text: str) -> List[Dict[str, any]]:
+        """
+        Parse LLM response into structured step objects.
+        """
+        steps = []
+        lines = response_text.strip().split('\n')
+        
+        # Icon mapping based on keywords
+        icon_map = {
+            'power': '⚡', 'cut': '⚡', 'voltage': '⚡', 'electrical': '⚡',
+            'temperature': '🌡️', 'heat': '🌡️', 'thermal': '🌡️', 'cool': '❄️',
+            'measure': '📊', 'check': '🔍', 'inspect': '👁️', 'test': '📊',
+            'resistance': '🔧', 'winding': '🔧', 'replace': '🔄', 'repair': '🔧',
+            'bearing': '⚙️', 'lubricate': '🛢️', 'oil': '🛢️',
+            'vibration': '📳', 'pressure': '📏', 'flow': '💧', 'level': '📏',
+            'filter': '🔍', 'clean': '🧹', 'remove': '🔧',
+            'listen': '👂', 'sound': '👂', 'noise': '👂',
+            'restart': '▶️', 'start': '▶️', 'stop': '⏹️',
+            'document': '📝', 'record': '📝', 'log': '📝',
+            'contact': '📞', 'call': '📞',
+        }
+        
+        step_id = 0
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Match numbered lines: "1. Step text" or "1) Step text"
+            import re
+            match = re.match(r'^\d+[\.\)]\s*(.+)$', line)
+            if match:
+                step_id += 1
+                step_text = match.group(1).strip()
+                
+                # Check if critical
+                is_critical = '[CRITICAL]' in step_text.upper() or '[critical]' in step_text
+                step_text = re.sub(r'\[CRITICAL\]\s*', '', step_text, flags=re.IGNORECASE).strip()
+                
+                # Find appropriate icon
+                icon = '🔧'  # default
+                step_lower = step_text.lower()
+                for keyword, emoji in icon_map.items():
+                    if keyword in step_lower:
+                        icon = emoji
+                        break
+                
+                steps.append({
+                    'id': step_id,
+                    'label': step_text,
+                    'icon': icon,
+                    'critical': is_critical,
+                })
+        
+        return steps
+    
+    def _get_fallback_logigramme(self, fault_type: str) -> List[Dict[str, any]]:
+        """
+        Return basic fallback steps if LLM fails.
+        """
+        base_steps = [
+            {'id': 1, 'label': 'Cut power supply', 'icon': '⚡', 'critical': True},
+            {'id': 2, 'label': 'Verify safe working conditions', 'icon': '🔍', 'critical': True},
+            {'id': 3, 'label': 'Inspect affected component', 'icon': '👁️', 'critical': False},
+            {'id': 4, 'label': 'Take measurements', 'icon': '📊', 'critical': False},
+            {'id': 5, 'label': 'Repair or replace faulty part', 'icon': '🔧', 'critical': False},
+            {'id': 6, 'label': 'Test operation before restart', 'icon': '📊', 'critical': False},
+        ]
+        return base_steps
+
     def _postprocess_chat_response(self, question: str, response_text: str) -> str:
         value = (response_text or "").strip()
         if not value:

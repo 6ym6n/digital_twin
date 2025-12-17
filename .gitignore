@@ -87,3 +87,6 @@ coverage/
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb_checkpoints/
+
+# Documentation
+docs/

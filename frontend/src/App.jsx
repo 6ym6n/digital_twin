@@ -404,7 +404,7 @@ function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onE
         </div>
       )}
       
-      <div className="bg-slate-800/50 rounded-lg p-4 max-h-64 overflow-y-auto">
+      <div className="bg-slate-800/50 rounded-lg p-4">
         {isLoading ? (
           <div className="flex items-center gap-3 text-slate-400">
             <RefreshCw className="w-5 h-5 animate-spin" />
@@ -474,6 +474,177 @@ function DiagnosisPanel({ diagnosis, shutdownDecision, isLoading, onRefresh, onE
               : 'Inject a fault to see AI diagnosis, then click Diagnose to analyze current state.'}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+// =====================================================
+// Troubleshooting Checklist Component - Dynamic via API
+// =====================================================
+function TroubleshootingChecklist({ activeFault, shutdownDecision, diagnosis }) {
+  const [steps, setSteps] = useState([])
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState(null)
+  const lastFetchRef = useRef({ fault: null, diagnosis: null })
+
+  // Fetch logigramme steps from API when fault or diagnosis changes
+  useEffect(() => {
+    // Only fetch if we have an active fault and diagnosis
+    if (!diagnosis || activeFault === 'NORMAL') {
+      setSteps([])
+      return
+    }
+
+    // Avoid refetching for same fault+diagnosis
+    if (
+      lastFetchRef.current.fault === activeFault &&
+      lastFetchRef.current.diagnosis === diagnosis
+    ) {
+      return
+    }
+
+    const fetchLogigramme = async () => {
+      setIsLoading(true)
+      setError(null)
+      
+      try {
+        const response = await fetch(`${API_BASE}/api/logigramme`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fault_type: activeFault,
+            diagnosis: diagnosis,
+          }),
+        })
+
+        if (response.ok) {
+          const data = await response.json()
+          setSteps(data.steps || [])
+          lastFetchRef.current = { fault: activeFault, diagnosis }
+        } else {
+          const err = await response.json()
+          setError(err.detail || 'Failed to generate steps')
+        }
+      } catch (err) {
+        setError('Connection error: ' + err.message)
+      } finally {
+        setIsLoading(false)
+      }
+    }
+
+    fetchLogigramme()
+  }, [activeFault, diagnosis])
+
+  // Only show if there's an active fault and a diagnosis
+  if (!diagnosis || activeFault === 'NORMAL') return null
+
+  const isImmediate = shutdownDecision?.action === 'IMMEDIATE_SHUTDOWN'
+
+  return (
+    <div className="glass rounded-xl p-4 mt-4">
+      <div className="flex items-center gap-2 mb-4">
+        <span className="text-xl">�</span>
+        <h3 className="font-semibold text-white">Troubleshooting Checklist</h3>
+        <span className="text-xs text-slate-400 ml-2">— Recommended actions for {activeFault.replace('_', ' ')}</span>
+        {isLoading && (
+          <span className="ml-auto text-xs text-cyan-400 animate-pulse">Generating steps...</span>
+        )}
+      </div>
+
+      {/* Immediate action warning */}
+      {isImmediate && (
+        <div className="mb-4 p-3 rounded-lg bg-red-500/20 border border-red-500/50 animate-pulse">
+          <div className="flex items-center gap-2">
+            <span className="text-lg">🚨</span>
+            <span className="text-red-400 font-semibold text-sm">IMMEDIATE ACTION REQUIRED — Follow critical steps first</span>
+          </div>
+        </div>
+      )}
+
+      {/* Error state */}
+      {error && (
+        <div className="mb-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30">
+          <span className="text-amber-400 text-sm">⚠️ {error}</span>
+        </div>
+      )}
+
+      {/* Loading state */}
+      {isLoading && steps.length === 0 && (
+        <div className="flex items-center gap-3 py-8 justify-center text-slate-400">
+          <div className="animate-spin w-5 h-5 border-2 border-cyan-400 border-t-transparent rounded-full"></div>
+          <span>Generating troubleshooting steps from manual...</span>
+        </div>
+      )}
+
+      {/* Flowchart steps */}
+      {steps.length > 0 && (
+        <div className="relative">
+          {steps.map((step, index) => (
+            <div key={step.id} className="flex items-start gap-3 mb-3">
+              {/* Step number with connector line */}
+              <div className="flex flex-col items-center">
+                <div className={`
+                  w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold
+                  ${step.critical 
+                    ? 'bg-red-500/30 border-2 border-red-500 text-red-400' 
+                    : 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400'
+                  }
+                `}>
+                  {step.id}
+                </div>
+                {index < steps.length - 1 && (
+                  <div className="w-0.5 h-6 bg-slate-600 mt-1"></div>
+                )}
+              </div>
+
+              {/* Step content */}
+              <div className={`
+                flex-1 p-3 rounded-lg border transition-all
+                ${step.critical 
+                  ? 'bg-red-500/10 border-red-500/30 hover:bg-red-500/20' 
+                  : 'bg-slate-800/50 border-slate-700/50 hover:bg-slate-700/50'
+                }
+              `}>
+                <div className="flex items-center gap-2">
+                  <span className="text-lg">{step.icon}</span>
+                  <span className={`text-sm ${step.critical ? 'text-red-300 font-semibold' : 'text-slate-300'}`}>
+                    {step.label}
+                  </span>
+                  {step.critical && (
+                    <span className="ml-auto text-xs bg-red-500/30 text-red-400 px-2 py-0.5 rounded">CRITICAL</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+
+          {/* Final step indicator */}
+          <div className="flex items-center gap-3 mt-2">
+            <div className="w-8 h-8 rounded-full flex items-center justify-center bg-green-500/20 border border-green-500/50">
+              <span className="text-green-400">✓</span>
+            </div>
+            <div className="flex-1 p-3 rounded-lg bg-green-500/10 border border-green-500/30">
+              <span className="text-green-400 text-sm font-medium">Verify return to normal → Restart if OK</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Legend */}
+      <div className="mt-4 pt-3 border-t border-slate-700/50 flex items-center gap-4 text-xs text-slate-500">
+        <div className="flex items-center gap-1">
+          <div className="w-3 h-3 rounded-full bg-red-500/30 border border-red-500"></div>
+          <span>Critical step</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <div className="w-3 h-3 rounded-full bg-cyan-500/20 border border-cyan-500/50"></div>
+          <span>Standard step</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <div className="w-3 h-3 rounded-full bg-green-500/20 border border-green-500/50"></div>
+          <span>Final validation</span>
+        </div>
       </div>
     </div>
   )
@@ -1517,6 +1688,13 @@ function App() {
             onRefresh={handleRefreshDiagnosis}
             onEmergencyStop={handleEmergencyStop}
             activeFault={activeFault}
+          />
+
+          {/* Troubleshooting Checklist */}
+          <TroubleshootingChecklist
+            activeFault={activeFault}
+            shutdownDecision={shutdownDecision}
+            diagnosis={diagnosis}
           />
         </div>
       </div>
