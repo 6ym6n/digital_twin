@@ -22,18 +22,27 @@ class RAGEngine:
     
     def __init__(
         self, 
-        pdf_path: str = "../data/grundfos-cr-pump-troubleshooting.pdf",
-        persist_directory: str = "./chroma_db",
+        pdf_path: str = None,
+        persist_directory: str = None,
         collection_name: str = "pump_manual"
     ):
         """
         Initialize the RAG engine with PDF document and vector store.
         
         Args:
-            pdf_path: Path to the pump manual PDF
-            persist_directory: Directory for ChromaDB persistence
+            pdf_path: Path to the pump manual PDF (defaults to project's data folder)
+            persist_directory: Directory for ChromaDB persistence (defaults to project's chroma_db)
             collection_name: Name of the ChromaDB collection
         """
+        # Get project root directory (src/../ = digital_twin/)
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        
+        # Use absolute paths
+        if pdf_path is None:
+            pdf_path = os.path.join(project_root, "data", "grundfos-cr-pump-troubleshooting.pdf")
+        if persist_directory is None:
+            persist_directory = os.path.join(project_root, "chroma_db")
+        
         self.pdf_path = pdf_path
         self.persist_directory = persist_directory
         self.collection_name = collection_name
