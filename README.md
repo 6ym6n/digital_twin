@@ -60,13 +60,13 @@ digital_twin/
 **1. Install MQTT Broker**
 ```bash
 # Windows
-choco install mosquitto && net start mosquitto
+choco install mosquitto ; net start mosquitto
 
 # macOS
-brew install mosquitto && brew services start mosquitto
+brew install mosquitto ; brew services start mosquitto
 
 # Linux
-sudo apt install mosquitto && sudo systemctl start mosquitto
+sudo apt install mosquitto ; sudo systemctl start mosquitto
 ```
 
 **2. Clone & Setup**
@@ -80,22 +80,23 @@ venv\Scripts\activate  # Windows
 pip install -r requirements.txt
 
 # Frontend
-cd frontend && npm install && cd ..
+cd frontend ; npm install ; cd ..
 
 # Configure
-cp .env.example .env  # Add GOOGLE_API_KEY
+cp .env.example .env  # Add GOOGLE_API_KEY (IMPORTANT)
 ```
 
 **3. Start Services**
 ```bash
-# Windows
-start_backend.bat       # Terminal 1
-start_frontend.bat      # Terminal 2  
-start_matlab_simulation.bat  # Terminal 3 (optional)
+
+#In 3 Separate Terminals
+.\start_backend.bat       # Terminal 1
+.\start_frontend.bat      # Terminal 2  
+.\start_matlab_simulation.bat  # Terminal 3 (optional)
 
 # Or manually
 uvicorn backend.api:app --reload --port 8000
-cd frontend && npm run dev
+cd frontend ; npm run dev
 python src/simulator.py  # if no MATLAB
 ```
 

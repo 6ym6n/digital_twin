@@ -10,7 +10,7 @@ websockets
 langchain
 langchain-google-genai
 google-generativeai
-
+langchain_community
 # Vector Database
 chromadb
 
