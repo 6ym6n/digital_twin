@@ -20,12 +20,10 @@ from pydantic import BaseModel
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.simulator import PumpSimulator, FaultType
 from src.ai_agent import MaintenanceAIAgent
 from backend.mqtt_bridge import MQTTBridge, load_mqtt_config_from_env
 
 # Global instances
-pump_simulator: Optional[PumpSimulator] = None
 ai_agent: Optional[MaintenanceAIAgent] = None
 mq_bridge: Optional[MQTTBridge] = None
 active_connections: List[WebSocket] = []
@@ -40,13 +38,16 @@ chat_sessions: Dict[str, List[Dict[str, str]]] = {}
 # Basic guardrail: keep chat focused on pump maintenance topics.
 # (A rules-based filter is simple, fast, and reliable for demos.)
 MAINTENANCE_KEYWORDS = (
-    # FR
+    # FR - Questions et contexte
     "pompe",
     "moteur",
     "maintenance",
     "diagnostic",
     "défaut",
     "defaut",
+    "panne",
+    "problème",
+    "probleme",
     "capteur",
     "tension",
     "courant",
@@ -65,6 +66,48 @@ MAINTENANCE_KEYWORDS = (
     "helice",
     "turbine",
     "impeller",
+    "réparer",
+    "reparer",
+    "vérifier",
+    "verifier",
+    "inspecter",
+    "tester",
+    "mesurer",
+    "analyser",
+    "arrêter",
+    "arreter",
+    "démarrer",
+    "demarrer",
+    "système",
+    "systeme",
+    "équipement",
+    "equipement",
+    "alarme",
+    "alerte",
+    "données",
+    "donnees",
+    "valeur",
+    "mesure",
+    "état",
+    "etat",
+    "fonctionnement",
+    "opération",
+    "operation",
+    # FR - Mots courants dans les questions
+    "pourquoi",
+    "comment",
+    "quoi",
+    "quel",
+    "quelle",
+    "quels",
+    "quelles",
+    "est-ce",
+    "faire",
+    "dois",
+    "faut",
+    "peut",
+    "aide",
+    "explique",
     # EN
     "pump",
     "motor",
@@ -76,6 +119,21 @@ MAINTENANCE_KEYWORDS = (
     "bearing",
     "overload",
     "seal",
+    "system",
+    "equipment",
+    "test",
+    "check",
+    "measure",
+    "repair",
+    "fix",
+    "stop",
+    "start",
+    "data",
+    "value",
+    "status",
+    "operation",
+    "alarm",
+    "alert",
     # Project terms
     "mqtt",
     "simulink",
@@ -204,20 +262,10 @@ def _get_fault_context_for_prompt() -> Optional[Dict[str, Any]]:
     }
 
 
-def _get_sensor_source() -> str:
-    """Select sensor source: 'simulator' (default) or 'mqtt'."""
-    return os.getenv("SENSOR_SOURCE", "simulator").strip().lower()
-
-
 def _get_latest_sensor_reading() -> Optional[Dict]:
-    source = _get_sensor_source()
-    if source == "mqtt" and mq_bridge:
+    """Get latest sensor reading from MQTT bridge (MATLAB simulation)."""
+    if mq_bridge:
         reading = mq_bridge.latest()
-        if reading:
-            _track_fault_context(reading)
-        return reading
-    if pump_simulator:
-        reading = pump_simulator.get_sensor_reading()
         if reading:
             _track_fault_context(reading)
         return reading
@@ -253,25 +301,22 @@ class DiagnosticRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize resources on startup"""
-    global pump_simulator, ai_agent, mq_bridge
+    global ai_agent, mq_bridge
     
     print("\n" + "="*60)
     print("🚀 Starting Digital Twin Backend Server")
     print("="*60 + "\n")
     
-    # Initialize simulator (kept for fallback and local-only mode)
-    pump_simulator = PumpSimulator()
-
-    # Initialize MQTT bridge if enabled
-    if _get_sensor_source() == "mqtt":
-        try:
-            mq_bridge = MQTTBridge(load_mqtt_config_from_env(), max_history=MAX_HISTORY)
-            mq_bridge.start()
-            print("📡 MQTT sensor source enabled")
-        except Exception as e:
-            mq_bridge = None
-            print(f"⚠️ MQTT bridge initialization failed: {e}")
-            print("   Falling back to simulator sensor source")
+    # Initialize MQTT bridge (required - connects to MATLAB simulation)
+    try:
+        mq_bridge = MQTTBridge(load_mqtt_config_from_env(), max_history=MAX_HISTORY)
+        mq_bridge.start()
+        print("📡 MQTT bridge connected to MATLAB simulation")
+    except Exception as e:
+        print(f"❌ MQTT bridge initialization failed: {e}")
+        print("   ERROR: MQTT connection required for MATLAB simulation")
+        print("   Please ensure MATLAB simulation is running and MQTT broker is available")
+        raise
     
     # Initialize AI agent (may take a few seconds for embeddings)
     try:
@@ -339,56 +384,28 @@ async def get_sensor_data():
 @app.get("/api/sensor-history")
 async def get_sensor_history():
     """Get historical sensor data (last 60 readings)"""
-    if _get_sensor_source() == "mqtt" and mq_bridge:
+    if mq_bridge:
         return {"history": mq_bridge.history()}
-    return {"history": sensor_history}
+    raise HTTPException(status_code=503, detail="MQTT bridge not available")
 
 
 @app.post("/api/inject-fault")
 async def inject_fault(request: FaultRequest):
-    """Inject a fault condition into the simulator"""
-    # In MQTT mode, publish a command to the external simulator.
-    if _get_sensor_source() == "mqtt":
-        if mq_bridge is None:
-            raise HTTPException(status_code=503, detail="MQTT bridge not initialized")
-        fault_id = request.fault_type.upper().strip()
-        if fault_id == "NORMAL":
-            mq_bridge.publish_command("RESET")
-        else:
-            params: Dict[str, Any] = {}
-            if request.temperature_target is not None:
-                params["temperature_target"] = float(request.temperature_target)
-            if request.temperature_band is not None:
-                params["temperature_band"] = float(request.temperature_band)
-            mq_bridge.publish_command("INJECT_FAULT", fault_type=fault_id, params=params or None)
-        return {"status": "success", "message": f"Command sent via MQTT: {fault_id}"}
-
-    # Simulator mode
-    if pump_simulator is None:
-        raise HTTPException(status_code=503, detail="Simulator not initialized")
+    """Inject a fault condition into the MATLAB simulator via MQTT"""
+    if mq_bridge is None:
+        raise HTTPException(status_code=503, detail="MQTT bridge not initialized")
     
-    fault_mapping = {
-        "NORMAL": FaultType.NORMAL,
-        "WINDING_DEFECT": FaultType.WINDING_DEFECT,
-        "SUPPLY_FAULT": FaultType.SUPPLY_FAULT,
-        "CAVITATION": FaultType.CAVITATION,
-        "BEARING_WEAR": FaultType.BEARING_WEAR,
-        "OVERLOAD": FaultType.OVERLOAD,
-    }
-    
-    fault_type = fault_mapping.get(request.fault_type.upper())
-    if fault_type is None:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Invalid fault type. Valid options: {list(fault_mapping.keys())}"
-        )
-    
-    if fault_type == FaultType.NORMAL:
-        pump_simulator.reset_fault()
-        return {"status": "success", "message": "System reset to normal operation"}
+    fault_id = request.fault_type.upper().strip()
+    if fault_id == "NORMAL":
+        mq_bridge.publish_command("RESET")
     else:
-        pump_simulator.inject_fault(fault_type)
-        return {"status": "success", "message": f"Fault injected: {fault_type.value}"}
+        params: Dict[str, Any] = {}
+        if request.temperature_target is not None:
+            params["temperature_target"] = float(request.temperature_target)
+        if request.temperature_band is not None:
+            params["temperature_band"] = float(request.temperature_band)
+        mq_bridge.publish_command("INJECT_FAULT", fault_type=fault_id, params=params or None)
+    return {"status": "success", "message": f"Command sent to MATLAB simulation: {fault_id}"}
 
 
 @app.post("/api/emergency-stop")
@@ -397,14 +414,10 @@ async def emergency_stop():
     Emergency stop - immediately reset pump to normal operation.
     Called automatically when critical conditions are detected.
     """
-    if _get_sensor_source() == "mqtt" and mq_bridge:
-        mq_bridge.publish_command("EMERGENCY_STOP")
-
-    if pump_simulator is None:
-        raise HTTPException(status_code=503, detail="Pump simulator not initialized")
-
-    # Keep local simulator safe as well
-    pump_simulator.reset_fault()
+    if mq_bridge is None:
+        raise HTTPException(status_code=503, detail="MQTT bridge not initialized")
+    
+    mq_bridge.publish_command("EMERGENCY_STOP")
     return {
         "status": "success",
         "message": "🛑 EMERGENCY STOP EXECUTED - Pump reset to safe state",
@@ -462,7 +475,7 @@ async def chat(request: ChatRequest):
 
         msg = (request.message or "").strip()
 
-        # Guardrail: DISABLED for now (was too strict)
+        # Guardrail: Disabled - handled in AI prompt instead
         # if not _is_maintenance_question(msg):
         #     return {
         #         "response": _maintenance_refusal_message(msg),
@@ -568,16 +581,10 @@ async def websocket_sensor_stream(websocket: WebSocket):
         while True:
             reading = _get_latest_sensor_reading()
             if reading:
-                # Add to history (simulator mode only; MQTT keeps its own)
-                if _get_sensor_source() != "mqtt":
-                    sensor_history.append(reading)
-                    if len(sensor_history) > MAX_HISTORY:
-                        sensor_history.pop(0)
-
                 await websocket.send_json({
                     "type": "sensor_update",
                     "data": reading,
-                    "history_length": len(sensor_history) if _get_sensor_source() != "mqtt" else (len(mq_bridge.history()) if mq_bridge else 0)
+                    "history_length": len(mq_bridge.history()) if mq_bridge else 0
                 })
             
             await asyncio.sleep(1)  # 1 Hz update rate

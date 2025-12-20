@@ -90,3 +90,7 @@ coverage/
 
 # Documentation
 docs/
+
+# Video Scripts
+video_script.md
+script_audio_elevenlabs.txt

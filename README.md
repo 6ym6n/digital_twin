@@ -19,7 +19,7 @@ Monitor pump health through MQTT telemetry and get intelligent fault diagnostics
 |-------|-----------|
 | Frontend | React + Vite |
 | Backend | FastAPI + WebSocket |
-| Simulation | MATLAB/Simulink (optional) |
+| Simulation | MATLAB/Simulink (required) |
 | Protocol | MQTT (Mosquitto) |
 | AI/LLM | Google Gemini 2.5 Flash |
 | Vector DB | ChromaDB + LangChain |
@@ -35,9 +35,8 @@ digital_twin/
 │   └── src/App.jsx                # Main UI component
 ├── src/                           # Core modules
 │   ├── rag_engine.py              # Vector search engine
-│   ├── ai_agent.py                # Gemini AI integration
-│   └── simulator.py               # Python fallback simulator
-├── matlab/                        # MATLAB simulation
+│   └── ai_agent.py                # Gemini AI integration
+├── matlab/                        # MATLAB simulation (required)
 │   └── mqtt_digital_twin.m        # Telemetry publisher
 ├── data/                          # Knowledge base
 │   └── grundfos-cr-pump-troubleshooting.pdf
@@ -53,7 +52,7 @@ digital_twin/
 - Python 3.9+, Node.js 16+
 - [Google Gemini API Key](https://makersuite.google.com/app/apikey)
 - MQTT Broker (Mosquitto)
-- MATLAB R2020b+ (optional)
+- MATLAB R2020b+ (required for simulation)
 
 ### Installation
 
@@ -92,12 +91,12 @@ cp .env.example .env  # Add GOOGLE_API_KEY (IMPORTANT)
 #In 3 Separate Terminals
 .\start_backend.bat       # Terminal 1
 .\start_frontend.bat      # Terminal 2  
-.\start_matlab_simulation.bat  # Terminal 3 (optional)
+.\start_matlab_simulation.bat  # Terminal 3 (required)
 
 # Or manually
 uvicorn backend.api:app --reload --port 8000
 cd frontend ; npm run dev
-python src/simulator.py  # if no MATLAB
+# MATLAB simulation must be running
 ```
 
 **4. Access**
@@ -106,13 +105,13 @@ python src/simulator.py  # if no MATLAB
 
 ## 🎮 Usage
 
-1. Start all services (backend, frontend, MQTT)
+1. Start all services (backend, frontend, MQTT, MATLAB)
 2. Open http://localhost:5173
 3. View real-time sensor data
 4. Click **"Diagnose"** for AI analysis
 5. Use chat for maintenance questions
 
-### MATLAB Simulation
+### MATLAB Simulation (Required)
 ```bash
 # Windows: Auto-start
 start_matlab_simulation.bat
@@ -135,7 +134,7 @@ MATLAB → MQTT → FastAPI → WebSocket → React
 **Components:**
 - **RAG Engine** - Semantic search in pump manual
 - **AI Agent** - Gemini-powered diagnostics & chat
-- **Simulator** - 6 fault types (cavitation, bearing wear, etc.)
+- **MATLAB Simulator** - 6 fault types (cavitation, bearing wear, etc.)
 - **MQTT Bridge** - Telemetry relay
 - **Frontend** - Real-time charts & 3D model
 
@@ -156,7 +155,7 @@ net stop mosquitto && net start mosquitto
 - Ensure MQTT broker is running
 
 **No Data Displayed**
-- Start MATLAB or Python simulator
+- Start MATLAB simulation (required)
 - Check backend logs for MQTT connection
 - Verify broker on localhost:1883
 
