@@ -171,7 +171,7 @@ python src/rag_engine.py
 - [Installation Guide](documents/INSTALLATION.md)
 - [Architecture Details](documents/PIPELINE.md)
 - [Simulation Guide](documents/SIMULATION.md)
-- [Presentation Deck](documents/slideready.md)
+- [Presentation Deck](documents/DIGITAL TWIN AUGMENTE AVEC IA GENERATIVE (4).pdf)
 - [MATLAB Setup](matlab/README.md)
 
 ## 📄 License
