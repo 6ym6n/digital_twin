@@ -170,10 +170,10 @@ python src/rag_engine.py
 
 ## 📚 Documentation
 
-- [Installation Guide](documents/INSTALLATION.md)
+- [Installation Guide (PDF)](documents/guide_installation.pdf)
 - [Architecture Details](documents/PIPELINE.md)
 - [Simulation Guide](documents/SIMULATION.md)
-- [Presentation Deck](documents/slideready.md)
+- [Presentation Deck (PDF)](documents/DIGITAL%20TWIN%20AUGMENTE%20AVEC%20IA%20GENERATIVE%20(4).pdf)
 - [MATLAB Setup](matlab/README.md)
 
 ## 📄 License
