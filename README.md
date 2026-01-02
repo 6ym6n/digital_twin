@@ -168,10 +168,10 @@ python src/rag_engine.py
 
 ## 📚 Documentation
 
-- [Installation Guide](docs/INSTALLATION.md)
-- [Architecture Details](docs/PIPELINE.md)
-- [Simulation Guide](docs/SIMULATION.md)
-- [Presentation Deck](docs/slideready.md)
+- [Installation Guide](documents/INSTALLATION.md)
+- [Architecture Details](documents/PIPELINE.md)
+- [Simulation Guide](documents/SIMULATION.md)
+- [Presentation Deck](documents/slideready.md)
 - [MATLAB Setup](matlab/README.md)
 
 ## 📄 License
