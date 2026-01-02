@@ -28,10 +28,12 @@ Monitor pump health through MQTT telemetry and get intelligent fault diagnostics
 
 ```
 digital_twin/
+├── .env.example                   # Environment template (set GOOGLE_API_KEY)
 ├── backend/                       # FastAPI backend
 │   ├── api.py                     # REST + WebSocket endpoints
 │   └── mqtt_bridge.py             # MQTT subscriber
 ├── frontend/                      # React dashboard
+│   ├── public/models/             # 3D assets served at /models
 │   └── src/App.jsx                # Main UI component
 ├── src/                           # Core modules
 │   ├── rag_engine.py              # Vector search engine
@@ -40,7 +42,7 @@ digital_twin/
 │   └── mqtt_digital_twin.m        # Telemetry publisher
 ├── data/                          # Knowledge base
 │   └── grundfos-cr-pump-troubleshooting.pdf
-├── docs/                          # Documentation
+├── documents/                     # Documentation
 ├── start_backend.bat              # Launch scripts
 ├── start_frontend.bat
 └── start_matlab_simulation.bat
@@ -168,10 +170,10 @@ python src/rag_engine.py
 
 ## 📚 Documentation
 
-- [Installation Guide](docs/INSTALLATION.md)
-- [Architecture Details](docs/PIPELINE.md)
-- [Simulation Guide](docs/SIMULATION.md)
-- [Presentation Deck](docs/slideready.md)
+- [Installation Guide](documents/INSTALLATION.md)
+- [Architecture Details](documents/PIPELINE.md)
+- [Simulation Guide](documents/SIMULATION.md)
+- [Presentation Deck](documents/slideready.md)
 - [MATLAB Setup](matlab/README.md)
 
 ## 📄 License

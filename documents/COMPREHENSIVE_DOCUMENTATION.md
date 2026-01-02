@@ -3627,8 +3627,10 @@ digital_twin/
 ├── tools/                            # Development Tools
 │   └── mqtt_fake_matlab.py           # MQTT test publisher
 │
-├── 3DMODEL/                          # 3D Model Source
-│   ├── Grundfos CR 15 Pump.STL
+├── frontend/public/models/           # 3D assets served by the frontend
+│   └── Grundfos CR 15 Pump.STL
+│
+├── docs/                             # Documentation (markdown + PDFs)
 │   └── Capture d'écran 2025-12-04 191113.png
 │
 ├── .env.example                      # Environment template

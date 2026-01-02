@@ -88,8 +88,10 @@ coverage/
 .ipynb_checkpoints/
 *.ipynb_checkpoints/
 
-# Documentation
-docs/
+# MATLAB / Simulink (generated)
+slprj/
+matlab/slprj/
+*.asv
 
 # Video Scripts
 video_script.md
